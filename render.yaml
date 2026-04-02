@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: treiner-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m bot.main
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: YUKASSA_SHOP_ID
+        sync: false
+      - key: YUKASSA_SECRET_KEY
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: GROUP_GENERAL_ID
+        sync: false
+      - key: GROUP_START_ID
+        sync: false
+      - key: GROUP_PROGRESS_ID
+        sync: false
+      - key: GROUP_RESULT_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TOPIC_NUTRITION_ID
+        sync: false
+      - key: TOPIC_ARTICLES_ID
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: WEBHOOK_BASE_URL
+        sync: false
+      - key: PORT
+        value: "8080"
