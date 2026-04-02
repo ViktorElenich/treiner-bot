@@ -40,7 +40,9 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot, config) -> None:
-    """Вызывается при запуске бота — устанавливает webhook."""
+    """Вызывается при запуске бота — инициализирует БД и устанавливает webhook."""
+    await init_db()
+
     webhook_url = f"{config.webhook_base_url}/webhook"
     await bot.set_webhook(
         url=webhook_url,
@@ -91,8 +93,8 @@ def run_webhook():
     bot, dp, config = create_bot_and_dispatcher()
 
     # Регистрируем события запуска/остановки
-    dp.startup.register(lambda: on_startup(bot, config))
-    dp.shutdown.register(lambda: on_shutdown(bot))
+    dp.startup.register(lambda **kw: on_startup(bot, config))
+    dp.shutdown.register(lambda **kw: on_shutdown(bot))
 
     # Создаём веб-приложение
     app = web.Application()
