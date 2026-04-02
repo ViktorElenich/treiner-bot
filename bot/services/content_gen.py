@@ -100,34 +100,34 @@ async def generate_content(
 
 async def generate_image(topic: str, api_key: str) -> Optional[bytes]:
     """
-    Генерирует картинку через Gemini API.
+    Генерирует картинку через Imagen 4 API.
 
     topic: краткое описание темы поста
     Возвращает bytes изображения или None при ошибке.
     """
     prompt = (
-        f"Сгенерируй красивое фото для поста в Telegram о: {topic}. "
-        "Стиль: профессиональная фитнес-фотография, тёплые тона, "
-        "без текста на картинке, без людей, фокус на еде/спорте/природе."
+        f"Beautiful photo for a Telegram post about: {topic}. "
+        "Style: professional fitness photography, warm tones, "
+        "no text on image, no people, focus on food/sport/nature."
     )
 
     try:
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
+        response = client.models.generate_images(
+            model="imagen-4.0-fast-generate-001",
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                output_mime_type="image/jpeg",
             ),
         )
 
-        # Ищем изображение в ответе
-        for part in response.candidates[0].content.parts:
-            if part.inline_data and part.inline_data.mime_type.startswith("image/"):
-                logger.info("Картинка сгенерирована для: %s", topic[:50])
-                return part.inline_data.data
+        if response.generated_images:
+            image = response.generated_images[0].image
+            logger.info("Картинка сгенерирована для: %s", topic[:50])
+            return image.image_bytes
 
-        logger.warning("Gemini не вернул изображение")
+        logger.warning("Imagen не вернул изображение")
         return None
 
     except Exception as e:
