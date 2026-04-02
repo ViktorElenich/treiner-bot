@@ -93,8 +93,14 @@ def run_webhook():
     bot, dp, config = create_bot_and_dispatcher()
 
     # Регистрируем события запуска/остановки
-    dp.startup.register(lambda **kw: on_startup(bot, config))
-    dp.shutdown.register(lambda **kw: on_shutdown(bot))
+    async def _on_startup(**kwargs):
+        await on_startup(bot, config)
+
+    async def _on_shutdown(**kwargs):
+        await on_shutdown(bot)
+
+    dp.startup.register(_on_startup)
+    dp.shutdown.register(_on_shutdown)
 
     # Создаём веб-приложение
     app = web.Application()
