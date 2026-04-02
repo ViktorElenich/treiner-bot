@@ -92,16 +92,6 @@ def run_webhook():
     """Запуск в режиме webhook (для сервера Render)."""
     bot, dp, config = create_bot_and_dispatcher()
 
-    # Регистрируем события запуска/остановки
-    async def _on_startup(**kwargs):
-        await on_startup(bot, config)
-
-    async def _on_shutdown(**kwargs):
-        await on_shutdown(bot)
-
-    dp.startup.register(_on_startup)
-    dp.shutdown.register(_on_shutdown)
-
     # Создаём веб-приложение
     app = web.Application()
 
@@ -113,6 +103,16 @@ def run_webhook():
     )
     webhook_handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
+
+    # Инициализация БД и установка webhook при старте aiohttp
+    async def _on_startup(_app):
+        await on_startup(bot, config)
+
+    async def _on_shutdown(_app):
+        await on_shutdown(bot)
+
+    app.on_startup.append(_on_startup)
+    app.on_shutdown.append(_on_shutdown)
 
     # Настраиваем приём заявок с сайта
     setup_site_webhooks(app, bot, config)
