@@ -1,12 +1,15 @@
 """
 Генерация контента через Google Gemini API.
 Создаёт посты о питании и статьи о спорте для Telegram-группы.
+Генерация картинок — через Kie AI (Nano Banana 2).
 """
 
-import io
+import asyncio
+import json
 import logging
 from typing import Optional
 
+import aiohttp
 from google import genai
 from google.genai import types
 
@@ -98,9 +101,9 @@ async def generate_content(
         return "", f"❌ Ошибка генерации: {e}"
 
 
-async def generate_image(topic: str, api_key: str) -> Optional[bytes]:
+async def generate_image(topic: str, kie_api_key: str) -> Optional[bytes]:
     """
-    Генерирует картинку через Imagen 4 API.
+    Генерирует картинку через Kie AI API (Nano Banana 2).
 
     topic: краткое описание темы поста
     Возвращает bytes изображения или None при ошибке.
@@ -111,24 +114,61 @@ async def generate_image(topic: str, api_key: str) -> Optional[bytes]:
         "no text on image, no people, focus on food/sport/nature."
     )
 
+    headers = {
+        "Authorization": f"Bearer {kie_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": "nano-banana-2",
+        "input": {
+            "prompt": prompt,
+            "aspect_ratio": "1:1",
+            "resolution": "1K",
+            "output_format": "jpg",
+        },
+    }
+
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_images(
-            model="imagen-4.0-fast-generate-001",
-            prompt=prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-            ),
-        )
+        async with aiohttp.ClientSession() as session:
+            # 1. Создаём задачу
+            async with session.post(
+                "https://api.kie.ai/api/v1/jobs/createTask",
+                json=payload,
+                headers=headers,
+            ) as resp:
+                result = await resp.json()
+                if result.get("code") != 200:
+                    logger.error("Kie AI createTask ошибка: %s", result)
+                    return None
+                task_id = result["data"]["taskId"]
 
-        if response.generated_images:
-            image = response.generated_images[0].image
-            logger.info("Картинка сгенерирована для: %s", topic[:50])
-            return image.image_bytes
+            # 2. Поллим результат (макс ~60 сек)
+            for attempt in range(20):
+                await asyncio.sleep(3)
+                async with session.get(
+                    f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={task_id}",
+                    headers=headers,
+                ) as resp:
+                    result = await resp.json()
+                    state = result.get("data", {}).get("state", "")
 
-        logger.warning("Imagen не вернул изображение")
-        return None
+                    if state == "success":
+                        result_json = json.loads(result["data"]["resultJson"])
+                        image_url = result_json["resultUrls"][0]
+                        # 3. Скачиваем картинку
+                        async with session.get(image_url) as img_resp:
+                            image_bytes = await img_resp.read()
+                            logger.info("Картинка сгенерирована для: %s", topic[:50])
+                            return image_bytes
+
+                    elif state == "fail":
+                        fail_msg = result.get("data", {}).get("failMsg", "unknown")
+                        logger.error("Kie AI задача провалена: %s", fail_msg)
+                        return None
+
+            logger.warning("Kie AI таймаут: задача не завершилась за 60 сек")
+            return None
 
     except Exception as e:
         logger.error("Ошибка генерации картинки: %s", e)

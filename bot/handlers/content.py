@@ -204,7 +204,7 @@ async def cb_approve(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("content_image_"))
 async def cb_generate_image(callback: CallbackQuery, bot: Bot):
-    """Генерация картинки к посту. Работает только на сервере (не из России)."""
+    """Генерация картинки к посту через Kie AI (Nano Banana 2)."""
     config = load_config()
     content_type = callback.data.replace("content_image_", "")
 
@@ -214,12 +214,12 @@ async def cb_generate_image(callback: CallbackQuery, bot: Bot):
     post_text = lines[2] if len(lines) > 2 else full_text
     topic = post_text[:100]
 
-    await callback.answer("⏳ Генерирую картинку...")
+    await callback.answer("⏳ Генерирую картинку (10-30 сек)...")
 
-    image_data = await generate_image(topic, config.gemini_api_key)
+    image_data = await generate_image(topic, config.kie_api_key)
 
     if image_data:
-        photo = BufferedInputFile(image_data, filename="post_image.png")
+        photo = BufferedInputFile(image_data, filename="post_image.jpg")
         await bot.send_photo(
             chat_id=callback.from_user.id,
             photo=photo,
@@ -228,11 +228,7 @@ async def cb_generate_image(callback: CallbackQuery, bot: Bot):
     else:
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text=(
-                "⚠️ Не удалось сгенерировать картинку.\n\n"
-                "Генерация изображений заработает после деплоя бота на Render "
-                "(из России Google блокирует эту функцию)."
-            ),
+            text="⚠️ Не удалось сгенерировать картинку. Попробуй ещё раз.",
         )
 
 

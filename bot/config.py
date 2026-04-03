@@ -32,6 +32,9 @@ class Config:
     # Google Gemini API
     gemini_api_key: str
 
+    # Kie AI API (генерация картинок через Nano Banana 2)
+    kie_api_key: str
+
     # ID топиков в общем чате (форум-группе)
     topic_nutrition_id: int   # Тема "Питание"
     topic_articles_id: int    # Тема "Статьи о спорте"
@@ -60,6 +63,7 @@ def load_config() -> Config:
         group_progress_id=int(os.environ.get("GROUP_PROGRESS_ID", "0")),
         group_result_id=int(os.environ.get("GROUP_RESULT_ID", "0")),
         gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
+        kie_api_key=os.environ.get("KIE_API_KEY", ""),
         topic_nutrition_id=int(os.environ.get("TOPIC_NUTRITION_ID", "0")),
         topic_articles_id=int(os.environ.get("TOPIC_ARTICLES_ID", "0")),
         webhook_secret=os.environ.get("WEBHOOK_SECRET", "default-secret-change-me"),
