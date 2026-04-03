@@ -205,30 +205,44 @@ async def cb_approve(callback: CallbackQuery, bot: Bot):
 @router.callback_query(F.data.startswith("content_image_"))
 async def cb_generate_image(callback: CallbackQuery, bot: Bot):
     """Генерация картинки к посту через Kie AI (Nano Banana 2)."""
-    config = load_config()
-    content_type = callback.data.replace("content_image_", "")
+    logger.info("Запрос на генерацию картинки: callback_data=%s", callback.data)
 
-    # Извлекаем текст для темы картинки
-    full_text = callback.message.text or ""
-    lines = full_text.split("\n", 2)
-    post_text = lines[2] if len(lines) > 2 else full_text
-    topic = post_text[:100]
+    try:
+        config = load_config()
+        content_type = callback.data.replace("content_image_", "")
 
-    await callback.answer("⏳ Генерирую картинку (10-30 сек)...")
+        # Извлекаем текст для темы картинки
+        full_text = callback.message.text or ""
+        lines = full_text.split("\n", 2)
+        post_text = lines[2] if len(lines) > 2 else full_text
+        topic = post_text[:100]
 
-    image_data = await generate_image(topic, config.kie_api_key)
+        logger.info("Генерация картинки: topic=%r, kie_key=%s...",
+                     topic[:30], config.kie_api_key[:8] if config.kie_api_key else "EMPTY")
 
-    if image_data:
-        photo = BufferedInputFile(image_data, filename="post_image.jpg")
-        await bot.send_photo(
-            chat_id=callback.from_user.id,
-            photo=photo,
-            caption="🖼 Картинка к посту. Сохрани и отправь вместе с текстом.",
-        )
-    else:
+        await callback.answer("⏳ Генерирую картинку (10-30 сек)...")
+
+        image_data = await generate_image(topic, config.kie_api_key)
+
+        if image_data:
+            photo = BufferedInputFile(image_data, filename="post_image.jpg")
+            await bot.send_photo(
+                chat_id=callback.from_user.id,
+                photo=photo,
+                caption="🖼 Картинка к посту. Сохрани и отправь вместе с текстом.",
+            )
+            logger.info("Картинка отправлена пользователю %s", callback.from_user.id)
+        else:
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text="⚠️ Не удалось сгенерировать картинку. Попробуй ещё раз.",
+            )
+            logger.warning("Картинка не сгенерирована")
+    except Exception as e:
+        logger.error("Ошибка в cb_generate_image: %s", e, exc_info=True)
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text="⚠️ Не удалось сгенерировать картинку. Попробуй ещё раз.",
+            text=f"⚠️ Ошибка: {e}",
         )
 
 
