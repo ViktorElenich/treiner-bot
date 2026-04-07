@@ -66,6 +66,17 @@ async def init_db() -> None:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS waitlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                notified INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id)
+            )
+        """)
         await db.commit()
         logger.info("База данных инициализирована")
 
@@ -79,6 +90,57 @@ async def save_lead(source: str, name: str, phone: str,
             "VALUES (?, ?, ?, ?, ?)",
             (source, name, phone, direction, goal),
         )
+        await db.commit()
+
+
+async def add_to_waitlist(user_id: int, username: str = "",
+                          full_name: str = "") -> bool:
+    """
+    Добавляет пользователя в лист ожидания.
+    Возвращает True если добавлен, False если уже был в списке.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute(
+                "INSERT INTO waitlist (user_id, username, full_name) "
+                "VALUES (?, ?, ?)",
+                (user_id, username, full_name),
+            )
+            await db.commit()
+            return True
+        except Exception:
+            # UNIQUE constraint — уже в списке
+            return False
+
+
+async def get_waitlist_users() -> list:
+    """Возвращает список пользователей в листе ожидания (не уведомлённых)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT user_id, username, full_name FROM waitlist "
+            "WHERE notified = 0"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def mark_waitlist_notified() -> int:
+    """
+    Помечает всех в вейтлисте как уведомлённых.
+    Возвращает количество помеченных.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE waitlist SET notified = 1 WHERE notified = 0"
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def clear_waitlist() -> None:
+    """Очищает весь лист ожидания (после уведомления)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM waitlist WHERE notified = 1")
         await db.commit()
 
 
@@ -201,6 +263,67 @@ async def get_content_titles(content_type: str, limit: int = 20) -> list:
         )
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
+
+
+async def get_all_active_subscriptions() -> List[dict]:
+    """Возвращает все активные подписки (для /users)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM subscriptions "
+            "WHERE is_active = 1 ORDER BY expires_at ASC",
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_subscription_stats() -> dict:
+    """Статистика подписок: количество активных, выручка, разбивка по тарифам."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Общее количество активных и выручка
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(price), 0) as revenue "
+            "FROM subscriptions WHERE is_active = 1",
+        )
+        row = await cursor.fetchone()
+        active_count = row[0]
+        active_revenue = row[1]
+
+        # Всего подписок за всё время
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(price), 0) as revenue "
+            "FROM subscriptions",
+        )
+        row = await cursor.fetchone()
+        total_count = row[0]
+        total_revenue = row[1]
+
+        # Разбивка по тарифам (активные)
+        cursor = await db.execute(
+            "SELECT tariff, COUNT(*) as cnt "
+            "FROM subscriptions WHERE is_active = 1 GROUP BY tariff",
+        )
+        by_tariff = {r[0]: r[1] for r in await cursor.fetchall()}
+
+        return {
+            "active_count": active_count,
+            "active_revenue": active_revenue,
+            "total_count": total_count,
+            "total_revenue": total_revenue,
+            "by_tariff": by_tariff,
+        }
+
+
+async def extend_subscription(subscription_id: int, days: int) -> None:
+    """Продлевает подписку на N дней."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE subscriptions "
+            "SET expires_at = datetime(expires_at, '+' || ? || ' days') "
+            "WHERE id = ?",
+            (days, subscription_id),
+        )
+        await db.commit()
 
 
 async def reset_warnings(user_id: int, chat_id: int) -> int:

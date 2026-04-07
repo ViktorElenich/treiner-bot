@@ -10,6 +10,8 @@
 import asyncio
 import logging
 
+from bot.web.not_found import NOT_FOUND_HTML
+
 from dotenv import load_dotenv
 load_dotenv()  # Загружает настройки из файла .env
 
@@ -27,7 +29,9 @@ from bot.database import init_db
 from bot.handlers.content import router as content_router
 from bot.handlers.moderation import router as moderation_router
 from bot.handlers.payments import router as payments_router
+from bot.handlers.admin import router as admin_router
 from bot.handlers.start import router as start_router
+from bot.services.scheduler import start_scheduler, stop_scheduler
 from bot.services.yukassa import configure as configure_yukassa
 from bot.web.webhooks import setup_site_webhooks, setup_yukassa_webhook
 
@@ -79,6 +83,8 @@ def create_bot_and_dispatcher():
     dp.include_router(content_router)
     # payments_router ПЕРЕД start_router — чтобы pay_* обрабатывался в payments.py
     dp.include_router(payments_router)
+    # admin_router — команды /stats, /users, /extend (только для тренера)
+    dp.include_router(admin_router)
     dp.include_router(start_router)
 
     # Настраиваем ЮKassa (если ключи заданы)
@@ -93,7 +99,7 @@ def run_webhook():
     bot, dp, config = create_bot_and_dispatcher()
 
     # Создаём веб-приложение
-    app = web.Application()
+    app = web.Application(middlewares=[error_404_middleware])
 
     # Настраиваем приём обновлений от Telegram через webhook
     webhook_handler = SimpleRequestHandler(
@@ -104,11 +110,13 @@ def run_webhook():
     webhook_handler.register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
 
-    # Инициализация БД и установка webhook при старте aiohttp
+    # Инициализация БД, webhook и планировщика при старте aiohttp
     async def _on_startup(_app):
         await on_startup(bot, config)
+        start_scheduler(bot, config)
 
     async def _on_shutdown(_app):
+        stop_scheduler()
         await on_shutdown(bot)
 
     app.on_startup.append(_on_startup)
@@ -137,12 +145,30 @@ async def run_polling():
     # Удаляем старый webhook (если был)
     await bot.delete_webhook(drop_pending_updates=True)
 
+    # Запускаем планировщик подписок
+    start_scheduler(bot, config)
+
     me = await bot.get_me()
     logger.info("Бот запущен в режиме polling: @%s (%s)", me.username, me.full_name)
     logger.info("Нажми Ctrl+C для остановки")
 
     # Запускаем polling — бот будет работать пока не нажмёшь Ctrl+C
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        stop_scheduler()
+
+
+@web.middleware
+async def error_404_middleware(request, handler):
+    """Перехватывает 404 и возвращает HTML-страницу вместо дефолтного текста."""
+    try:
+        response = await handler(request)
+        if response.status == 404:
+            return web.Response(text=NOT_FOUND_HTML, content_type="text/html", status=404)
+        return response
+    except web.HTTPNotFound:
+        return web.Response(text=NOT_FOUND_HTML, content_type="text/html", status=404)
 
 
 async def health_check(request: web.Request) -> web.Response:

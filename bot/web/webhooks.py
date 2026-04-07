@@ -213,6 +213,58 @@ def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
     app.router.add_options("/api/lead", handle_options)
     app.router.add_options("/api/consultation", handle_options)
 
+    async def handle_waitlist(request: web.Request) -> web.Response:
+        """
+        Приём заявки в лист ожидания (когда набор на онлайн-программы закрыт).
+        Ожидает JSON: { "name": "Имя", "phone": "+7..." }
+        """
+        origin = _get_origin(request)
+        headers = _cors_headers(origin)
+
+        if origin and origin not in ALLOWED_ORIGINS:
+            return web.json_response(
+                {"error": "Forbidden"}, status=403, headers=headers,
+            )
+
+        client_ip = request.remote or "unknown"
+        if _is_rate_limited(client_ip):
+            return web.json_response(
+                {"error": "Too many requests"}, status=429, headers=headers,
+            )
+
+        try:
+            data = await request.json()
+            name = _sanitize(data.get("name", ""), 100) or "Не указано"
+            phone = _sanitize(data.get("phone", ""), 30) or "Не указано"
+
+            text = (
+                "📋 <b>Новая заявка в лист ожидания!</b>\n\n"
+                f"<b>Имя:</b> {_escape(name)}\n"
+                f"<b>Телефон/Telegram:</b> {_escape(phone)}\n\n"
+                "Клиент хочет записаться на онлайн-программу, "
+                "когда откроется следующий набор."
+            )
+            await bot.send_message(
+                chat_id=config.admin_chat_id,
+                text=text,
+                parse_mode="HTML",
+            )
+
+            await save_lead(source="waitlist", name=name, phone=phone)
+            logger.info("Waitlist заявка от %s отправлена тренеру", name)
+            return web.json_response(
+                {"status": "ok"}, headers=headers,
+            )
+
+        except Exception as e:
+            logger.error("Ошибка обработки waitlist-заявки: %s", e)
+            return web.json_response(
+                {"error": "Internal error"}, status=500, headers=headers,
+            )
+
+    app.router.add_post("/api/waitlist", handle_waitlist)
+    app.router.add_options("/api/waitlist", handle_options)
+
 
 def setup_yukassa_webhook(app: web.Application, bot: Bot, config) -> None:
     """Регистрирует маршрут для приёма уведомлений от ЮKassa."""

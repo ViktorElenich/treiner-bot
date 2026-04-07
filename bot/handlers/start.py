@@ -13,6 +13,7 @@ from bot.keyboards.inline import (
     tariff_detail_keyboard,
     back_to_menu_keyboard,
 )
+from bot.database import add_to_waitlist
 
 router = Router()
 
@@ -109,7 +110,36 @@ async def cmd_start(message: Message):
     # Проверяем deep-link параметр (из кнопок на сайте)
     args = message.text.split(maxsplit=1)
     if len(args) > 1:
-        param = args[1]  # например "tariff_progress"
+        param = args[1]  # например "tariff_progress" или "waitlist"
+
+        # Запись в лист ожидания
+        if param == "waitlist":
+            user = message.from_user
+            is_new = await add_to_waitlist(
+                user_id=user.id,
+                username=user.username or "",
+                full_name=user.full_name or "",
+            )
+            if is_new:
+                await message.answer(
+                    "📋 <b>Ты в листе ожидания!</b>\n\n"
+                    "Как только откроется набор на онлайн-программы, "
+                    "я сразу пришлю тебе уведомление.\n\n"
+                    "А пока — можешь посмотреть тарифы 👇",
+                    reply_markup=tariffs_keyboard(),
+                    parse_mode="HTML",
+                )
+            else:
+                await message.answer(
+                    "✅ <b>Ты уже в листе ожидания!</b>\n\n"
+                    "Я пришлю уведомление, когда откроется набор.\n\n"
+                    "Можешь посмотреть тарифы 👇",
+                    reply_markup=tariffs_keyboard(),
+                    parse_mode="HTML",
+                )
+            return
+
+        # Переход к конкретному тарифу
         if param.startswith("tariff_"):
             tariff_id = param.replace("tariff_", "")  # "progress"
             if tariff_id in TARIFFS:

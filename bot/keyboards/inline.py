@@ -96,6 +96,20 @@ def after_payment_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def renew_subscription_keyboard(tariff_id: str) -> InlineKeyboardMarkup:
+    """Кнопка продления подписки (в напоминаниях об истечении)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔄 Продлить подписку",
+            callback_data=f"pay_{tariff_id}",
+        )],
+        [InlineKeyboardButton(
+            text="« В главное меню",
+            callback_data="back_to_menu",
+        )],
+    ])
+
+
 def back_to_menu_keyboard() -> InlineKeyboardMarkup:
     """Кнопка "Назад в меню"."""
     return InlineKeyboardMarkup(inline_keyboard=[

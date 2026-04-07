@@ -9,6 +9,7 @@
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 from aiogram import Router, F, Bot
@@ -46,17 +47,22 @@ async def handle_pay(callback: CallbackQuery, bot: Bot):
     # Проверяем: может, уже есть активная подписка?
     existing = await get_active_subscription(user.id)
     if existing:
-        expires = existing["expires_at"][:10]
-        await callback.message.edit_text(
-            f"✅ <b>У тебя уже есть активная подписка</b>\n\n"
-            f"Тариф: <b>{TARIFFS.get(existing['tariff'], {}).get('name', existing['tariff'])}</b>\n"
-            f"Действует до: {expires}\n\n"
-            "Дождись окончания текущей подписки или напиши "
-            "тренеру для смены тарифа: @ViktorElenich",
-            reply_markup=back_to_menu_keyboard(),
-        )
-        await callback.answer()
-        return
+        expires_at = datetime.fromisoformat(existing["expires_at"])
+        days_left = (expires_at - datetime.utcnow()).days
+        if days_left > 3:
+            # Подписка ещё не скоро истекает — блокируем повторную оплату
+            expires = existing["expires_at"][:10]
+            await callback.message.edit_text(
+                f"✅ <b>У тебя уже есть активная подписка</b>\n\n"
+                f"Тариф: <b>{TARIFFS.get(existing['tariff'], {}).get('name', existing['tariff'])}</b>\n"
+                f"Действует до: {expires}\n\n"
+                "Дождись окончания текущей подписки или напиши "
+                "тренеру для смены тарифа: @ViktorElenich",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            await callback.answer()
+            return
+        # Подписка истекает через ≤3 дней — разрешаем продление
 
     # Создаём платёж в ЮKassa
     try:
