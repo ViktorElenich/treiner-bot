@@ -2,15 +2,74 @@
 Приём заявок с сайта.
 Когда клиент заполняет форму на сайте, данные отправляются сюда,
 и бот пересылает их тренеру в Telegram.
+
+Защита:
+- CORS: только viktor-trainer.ru (не *)
+- Rate limiting: 5 заявок в минуту с одного IP
+- Валидация: длина полей, удаление HTML-тегов
+- Экранирование: HTML-символы в Telegram-сообщениях
 """
 
 import logging
+import re
+import time
+from collections import defaultdict
+
 from aiohttp import web
 from aiogram import Bot
 
 from bot.database import save_lead
 
 logger = logging.getLogger(__name__)
+
+# ── Разрешённые домены для CORS ─────────────────────────────────
+ALLOWED_ORIGINS = [
+    "https://viktor-trainer.ru",
+    "https://www.viktor-trainer.ru",
+    "http://localhost:8080",  # Для локальной разработки
+]
+
+# ── Rate limiting ────────────────────────────────────────────────
+# Максимум 5 заявок в минуту с одного IP
+RATE_LIMIT = 5
+RATE_WINDOW = 60  # секунд
+_rate_store: dict[str, list[float]] = defaultdict(list)
+
+
+def _is_rate_limited(ip: str) -> bool:
+    """Проверяет, не превышен ли лимит запросов с IP."""
+    now = time.time()
+    # Убираем старые записи
+    _rate_store[ip] = [t for t in _rate_store[ip] if now - t < RATE_WINDOW]
+    if len(_rate_store[ip]) >= RATE_LIMIT:
+        return True
+    _rate_store[ip].append(now)
+    return False
+
+
+# ── Санитизация ввода ────────────────────────────────────────────
+def _sanitize(text: str, max_len: int = 200) -> str:
+    """Удаляет HTML-теги и ограничивает длину."""
+    clean = re.sub(r"<[^>]*>", "", text)
+    return clean.strip()[:max_len]
+
+
+def _get_origin(request: web.Request) -> str:
+    """Получает Origin из заголовков запроса."""
+    return request.headers.get("Origin", "")
+
+
+def _cors_headers(origin: str = "") -> dict:
+    """
+    CORS-заголовки — разрешают только доверенным доменам.
+    """
+    # Если Origin в списке разрешённых — отвечаем им же
+    allowed = origin if origin in ALLOWED_ORIGINS else ALLOWED_ORIGINS[0]
+    return {
+        "Access-Control-Allow-Origin": allowed,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
 
 
 def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
@@ -21,19 +80,27 @@ def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
         Приём заявки с формы "Запишись на разбор ситуации".
         Ожидает JSON: { "name": "Имя", "phone": "+7..." }
         """
-        # Проверяем секретный ключ
-        secret = request.headers.get("X-Webhook-Secret", "")
-        if secret != config.webhook_secret:
+        origin = _get_origin(request)
+        headers = _cors_headers(origin)
+
+        # Проверяем Origin
+        if origin and origin not in ALLOWED_ORIGINS:
             return web.json_response(
-                {"error": "Unauthorized"},
-                status=403,
-                headers=_cors_headers(),
+                {"error": "Forbidden"}, status=403, headers=headers,
+            )
+
+        # Rate limiting
+        client_ip = request.remote or "unknown"
+        if _is_rate_limited(client_ip):
+            logger.warning("Rate limit exceeded: %s", client_ip)
+            return web.json_response(
+                {"error": "Too many requests"}, status=429, headers=headers,
             )
 
         try:
             data = await request.json()
-            name = data.get("name", "Не указано")
-            phone = data.get("phone", "Не указано")
+            name = _sanitize(data.get("name", ""), 100) or "Не указано"
+            phone = _sanitize(data.get("phone", ""), 30) or "Не указано"
 
             # Отправляем заявку тренеру
             text = (
@@ -51,16 +118,13 @@ def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
             await save_lead(source="lead", name=name, phone=phone)
             logger.info("Lead заявка от %s отправлена тренеру", name)
             return web.json_response(
-                {"status": "ok"},
-                headers=_cors_headers(),
+                {"status": "ok"}, headers=headers,
             )
 
         except Exception as e:
             logger.error("Ошибка обработки lead-заявки: %s", e)
             return web.json_response(
-                {"error": "Internal error"},
-                status=500,
-                headers=_cors_headers(),
+                {"error": "Internal error"}, status=500, headers=headers,
             )
 
     async def handle_consultation(request: web.Request) -> web.Response:
@@ -69,20 +133,29 @@ def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
         Ожидает JSON: { "name": "Имя", "phone": "+7...",
                         "direction": "personal", "goal": "Похудеть" }
         """
-        secret = request.headers.get("X-Webhook-Secret", "")
-        if secret != config.webhook_secret:
+        origin = _get_origin(request)
+        headers = _cors_headers(origin)
+
+        # Проверяем Origin
+        if origin and origin not in ALLOWED_ORIGINS:
             return web.json_response(
-                {"error": "Unauthorized"},
-                status=403,
-                headers=_cors_headers(),
+                {"error": "Forbidden"}, status=403, headers=headers,
+            )
+
+        # Rate limiting
+        client_ip = request.remote or "unknown"
+        if _is_rate_limited(client_ip):
+            logger.warning("Rate limit exceeded: %s", client_ip)
+            return web.json_response(
+                {"error": "Too many requests"}, status=429, headers=headers,
             )
 
         try:
             data = await request.json()
-            name = data.get("name", "Не указано")
-            phone = data.get("phone", "Не указано")
-            direction = data.get("direction", "Не выбрано")
-            goal = data.get("goal", "Не указана")
+            name = _sanitize(data.get("name", ""), 100) or "Не указано"
+            phone = _sanitize(data.get("phone", ""), 30) or "Не указано"
+            direction = _sanitize(data.get("direction", ""), 50) or "Не выбрано"
+            goal = _sanitize(data.get("goal", ""), 300) or "Не указана"
 
             # Переводим код направления в читаемый текст
             direction_names = {
@@ -116,16 +189,13 @@ def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
             )
             logger.info("Consultation заявка от %s отправлена тренеру", name)
             return web.json_response(
-                {"status": "ok"},
-                headers=_cors_headers(),
+                {"status": "ok"}, headers=headers,
             )
 
         except Exception as e:
             logger.error("Ошибка обработки consultation-заявки: %s", e)
             return web.json_response(
-                {"error": "Internal error"},
-                status=500,
-                headers=_cors_headers(),
+                {"error": "Internal error"}, status=500, headers=headers,
             )
 
     async def handle_options(request: web.Request) -> web.Response:
@@ -133,10 +203,8 @@ def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
         Обработка preflight-запросов (CORS).
         Браузер отправляет OPTIONS перед POST, чтобы проверить разрешения.
         """
-        return web.Response(
-            status=200,
-            headers=_cors_headers(),
-        )
+        origin = _get_origin(request)
+        return web.Response(status=200, headers=_cors_headers(origin))
 
     # Регистрируем маршруты
     app.router.add_post("/api/lead", handle_lead)
@@ -144,18 +212,6 @@ def setup_site_webhooks(app: web.Application, bot: Bot, config) -> None:
     # CORS preflight
     app.router.add_options("/api/lead", handle_options)
     app.router.add_options("/api/consultation", handle_options)
-
-
-def _cors_headers() -> dict:
-    """
-    CORS-заголовки — разрешают сайту отправлять запросы к боту.
-    Без них браузер блокирует запросы с другого домена.
-    """
-    return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, X-Webhook-Secret",
-    }
 
 
 def setup_yukassa_webhook(app: web.Application, bot: Bot, config) -> None:
