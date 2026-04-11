@@ -8,6 +8,7 @@
   3-е нарушение → бан из группы
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -17,7 +18,14 @@ from aiogram.filters import Command
 
 from bot.config import load_config
 from bot.data.bad_words import contains_profanity
-from bot.database import get_warning_count, add_warning, reset_warnings
+from bot.database import (
+    add_protected_topic,
+    add_warning,
+    get_warning_count,
+    is_topic_protected,
+    remove_protected_topic,
+    reset_warnings,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -43,6 +51,89 @@ async def is_monitored_group(message: Message) -> bool:
     if message.chat.type not in ("group", "supergroup"):
         return False
     return message.chat.id in _get_monitored_ids()
+
+
+# ── Защита тем: только админ может постить новые сообщения ──────
+
+async def _should_delete_topic_post(message: Message, bot: Bot) -> bool:
+    """
+    Фильтр: нужно ли удалить это сообщение как нарушение темы.
+    True — в защищённой теме не-админ пытается написать новый пост
+    (не ответ на другой пост).
+    """
+    # Только в отслеживаемых супергруппах-форумах
+    if message.chat.type != "supergroup":
+        return False
+    if message.chat.id not in _get_monitored_ids():
+        return False
+    if not message.message_thread_id:
+        return False
+    if not message.from_user:
+        return False
+
+    # Админ и бот всегда могут постить
+    config = load_config()
+    if message.from_user.id == config.admin_chat_id:
+        return False
+    me = await bot.get_me()
+    if message.from_user.id == me.id:
+        return False
+
+    # Это реальный ответ на другой пост (комментарий)?
+    reply = message.reply_to_message
+    if reply:
+        is_topic_root = (
+            reply.message_id == message.message_thread_id
+            or getattr(reply, "forum_topic_created", None) is not None
+        )
+        if not is_topic_root:
+            # Ответ на конкретный пост — это комментарий, пропускаем
+            return False
+
+    # Топ-левел пост в теме. Удаляем, только если тема защищена.
+    return await is_topic_protected(message.chat.id, message.message_thread_id)
+
+
+async def _delete_notice_later(bot: Bot, chat_id: int, message_id: int,
+                               delay: int = 10) -> None:
+    """Удаляет уведомление через delay секунд."""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+@router.message(_should_delete_topic_post)
+async def delete_topic_post(message: Message, bot: Bot):
+    """Удаляет топ-левел посты не-админов в защищённых темах."""
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.error("Не удалось удалить пост в защищённой теме: %s", e)
+        return
+
+    # Показываем временное уведомление (10 сек)
+    try:
+        notice = await bot.send_message(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text=(
+                "💬 В этой теме можно только <b>комментировать</b> посты тренера.\n"
+                "Чтобы ответить — нажми на пост и выбери «Ответить»."
+            ),
+            parse_mode="HTML",
+        )
+        asyncio.create_task(
+            _delete_notice_later(bot, message.chat.id, notice.message_id)
+        )
+    except Exception as e:
+        logger.error("Не удалось отправить уведомление в тему: %s", e)
+
+    logger.info(
+        "Защита темы: удалён пост от user=%s в chat=%s thread=%s",
+        message.from_user.id, message.chat.id, message.message_thread_id,
+    )
 
 
 # ── Основной обработчик сообщений ────────────────────────────────
@@ -217,3 +308,88 @@ async def cmd_warnings(message: Message):
 
     name = target.full_name or f"@{target.username}" or str(target.id)
     await message.answer(f"📊 {name}: {count}/3 предупреждений.")
+
+
+# ── Команды управления защитой тем ───────────────────────────────
+
+@router.message(Command("topic_id"))
+async def cmd_topic_id(message: Message):
+    """Показывает ID текущей темы (для отладки)."""
+    config = load_config()
+    if message.from_user.id != config.admin_chat_id:
+        return
+
+    if not message.message_thread_id:
+        await message.answer("💡 Эта команда работает только внутри темы.")
+        return
+
+    await message.answer(
+        f"🆔 chat_id: <code>{message.chat.id}</code>\n"
+        f"thread_id: <code>{message.message_thread_id}</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("protect_topic"))
+async def cmd_protect_topic(message: Message):
+    """
+    Защищает текущую тему: в ней смогут писать только админ,
+    остальные — только комментарии под его постами.
+    Запускать внутри нужной темы.
+    """
+    config = load_config()
+    if message.from_user.id != config.admin_chat_id:
+        return
+
+    if not message.message_thread_id:
+        await message.answer(
+            "💡 Эту команду надо отправить внутри темы, которую защищаем."
+        )
+        return
+
+    if message.chat.id not in _get_monitored_ids():
+        await message.answer(
+            "⚠️ Эта группа не в списке отслеживаемых — защита не сработает."
+        )
+        return
+
+    # Попытаемся вытащить название темы из reply (если есть)
+    title = ""
+    if message.reply_to_message and getattr(
+        message.reply_to_message, "forum_topic_created", None
+    ):
+        title = message.reply_to_message.forum_topic_created.name or ""
+
+    added = await add_protected_topic(
+        chat_id=message.chat.id,
+        thread_id=message.message_thread_id,
+        title=title,
+    )
+    if added:
+        await message.answer(
+            "✅ Тема защищена. Теперь здесь могут постить только ты, "
+            "остальные — только комментировать твои посты."
+        )
+    else:
+        await message.answer("ℹ️ Эта тема уже была защищена.")
+
+
+@router.message(Command("unprotect_topic"))
+async def cmd_unprotect_topic(message: Message):
+    """Снимает защиту с текущей темы. Запускать внутри нужной темы."""
+    config = load_config()
+    if message.from_user.id != config.admin_chat_id:
+        return
+
+    if not message.message_thread_id:
+        await message.answer("💡 Эту команду надо отправить внутри темы.")
+        return
+
+    removed = await remove_protected_topic(
+        chat_id=message.chat.id,
+        thread_id=message.message_thread_id,
+    )
+    if removed:
+        await message.answer("✅ Защита снята. В теме снова могут писать все.")
+    else:
+        await message.answer("ℹ️ Эта тема не была защищена.")

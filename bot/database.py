@@ -77,6 +77,15 @@ async def init_db() -> None:
                 UNIQUE(user_id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS protected_topics (
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL,
+                title TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, thread_id)
+            )
+        """)
         await db.commit()
         logger.info("База данных инициализирована")
 
@@ -324,6 +333,45 @@ async def extend_subscription(subscription_id: int, days: int) -> None:
             (days, subscription_id),
         )
         await db.commit()
+
+
+# ── Защищённые темы (только админ может постить) ────────────────
+
+async def add_protected_topic(chat_id: int, thread_id: int,
+                              title: str = "") -> bool:
+    """Помечает тему как защищённую. True — добавлена, False — уже была."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute(
+                "INSERT INTO protected_topics (chat_id, thread_id, title) "
+                "VALUES (?, ?, ?)",
+                (chat_id, thread_id, title),
+            )
+            await db.commit()
+            return True
+        except Exception:
+            return False
+
+
+async def remove_protected_topic(chat_id: int, thread_id: int) -> bool:
+    """Снимает защиту с темы. True — была защищена, False — не была."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM protected_topics WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def is_topic_protected(chat_id: int, thread_id: int) -> bool:
+    """Проверяет, защищена ли тема."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM protected_topics WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        )
+        return await cursor.fetchone() is not None
 
 
 async def reset_warnings(user_id: int, chat_id: int) -> int:
