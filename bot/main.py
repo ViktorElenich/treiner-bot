@@ -60,9 +60,13 @@ async def on_startup(bot: Bot, config) -> None:
 
 
 async def on_shutdown(bot: Bot) -> None:
-    """Вызывается при остановке бота — удаляет webhook."""
-    await bot.delete_webhook()
-    logger.info("Webhook удалён, бот остановлен")
+    """Вызывается при остановке бота.
+
+    Webhook намеренно НЕ удаляется: при редеплое новый контейнер
+    переустанавливает его в on_startup, а промежуток «webhook отсутствует»
+    создаёт риск гонки и потери сообщений.
+    """
+    logger.info("Бот остановлен")
 
 
 def create_bot_and_dispatcher():
