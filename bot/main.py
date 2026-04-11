@@ -51,7 +51,6 @@ async def on_startup(bot: Bot, config) -> None:
     await bot.set_webhook(
         url=webhook_url,
         secret_token=config.webhook_secret,
-        drop_pending_updates=True,
     )
     logger.info("Webhook установлен: %s", webhook_url)
 
