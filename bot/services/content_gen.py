@@ -131,43 +131,45 @@ async def generate_image(topic: str, kie_api_key: str) -> Optional[bytes]:
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Создаём задачу
-            async with session.post(
-                "https://api.kie.ai/api/v1/jobs/createTask",
-                json=payload,
-                headers=headers,
-            ) as resp:
-                result = await resp.json()
-                if result.get("code") != 200:
-                    logger.error("Kie AI createTask ошибка: %s", result)
-                    return None
-                task_id = result["data"]["taskId"]
-
-            # 2. Поллим результат (макс ~60 сек)
-            for attempt in range(20):
-                await asyncio.sleep(3)
-                async with session.get(
-                    f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={task_id}",
+            for retry in range(2):
+                # 1. Создаём задачу
+                async with session.post(
+                    "https://api.kie.ai/api/v1/jobs/createTask",
+                    json=payload,
                     headers=headers,
                 ) as resp:
                     result = await resp.json()
-                    state = result.get("data", {}).get("state", "")
-
-                    if state == "success":
-                        result_json = json.loads(result["data"]["resultJson"])
-                        image_url = result_json["resultUrls"][0]
-                        # 3. Скачиваем картинку
-                        async with session.get(image_url) as img_resp:
-                            image_bytes = await img_resp.read()
-                            logger.info("Картинка сгенерирована для: %s", topic[:50])
-                            return image_bytes
-
-                    elif state == "fail":
-                        fail_msg = result.get("data", {}).get("failMsg", "unknown")
-                        logger.error("Kie AI задача провалена: %s", fail_msg)
+                    if result.get("code") != 200:
+                        logger.error("Kie AI createTask ошибка: %s", result)
                         return None
+                    task_id = result["data"]["taskId"]
 
-            logger.warning("Kie AI таймаут: задача не завершилась за 60 сек")
+                # 2. Поллим результат (макс ~120 сек)
+                for attempt in range(40):
+                    await asyncio.sleep(3)
+                    async with session.get(
+                        f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={task_id}",
+                        headers=headers,
+                    ) as resp:
+                        result = await resp.json()
+                        state = result.get("data", {}).get("state", "")
+
+                        if state == "success":
+                            result_json = json.loads(result["data"]["resultJson"])
+                            image_url = result_json["resultUrls"][0]
+                            # 3. Скачиваем картинку
+                            async with session.get(image_url) as img_resp:
+                                image_bytes = await img_resp.read()
+                                logger.info("Картинка сгенерирована для: %s", topic[:50])
+                                return image_bytes
+
+                        elif state == "fail":
+                            fail_msg = result.get("data", {}).get("failMsg", "unknown")
+                            logger.error("Kie AI задача провалена: %s", fail_msg)
+                            return None
+
+                logger.warning("Kie AI таймаут: задача не завершилась за 120 сек (попытка %d/2)", retry + 1)
+
             return None
 
     except Exception as e:

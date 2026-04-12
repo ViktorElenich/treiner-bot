@@ -220,7 +220,7 @@ async def cb_generate_image(callback: CallbackQuery, bot: Bot):
         logger.info("Генерация картинки: topic=%r, kie_key=%s...",
                      topic[:30], config.kie_api_key[:8] if config.kie_api_key else "EMPTY")
 
-        await callback.answer("⏳ Генерирую картинку (10-30 сек)...")
+        await callback.answer("⏳ Генерирую картинку (до 2 мин)...")
 
         image_data = await generate_image(topic, config.kie_api_key)
 
