@@ -109,9 +109,10 @@ async def generate_image(topic: str, kie_api_key: str) -> Optional[bytes]:
     Возвращает bytes изображения или None при ошибке.
     """
     prompt = (
-        f"Beautiful photo for a Telegram post about: {topic}. "
-        "Style: professional fitness photography, warm tones, "
-        "no text on image, no people, focus on food/sport/nature."
+        f"A vivid, aesthetic photograph that directly illustrates the topic: \"{topic}\". "
+        "The image should clearly relate to this specific subject. "
+        "Style: clean, professional, warm natural lighting, shallow depth of field. "
+        "No text, no watermarks, no people. High quality stock photo look."
     )
 
     headers = {

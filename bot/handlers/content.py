@@ -211,11 +211,17 @@ async def cb_generate_image(callback: CallbackQuery, bot: Bot):
         config = load_config()
         content_type = callback.data.replace("content_image_", "")
 
-        # Извлекаем текст для темы картинки
-        full_text = callback.message.text or ""
-        lines = full_text.split("\n", 2)
-        post_text = lines[2] if len(lines) > 2 else full_text
-        topic = post_text[:100]
+        # Используем заголовок из pending (точнее описывает тему)
+        pending = _pending.get(callback.message.message_id)
+        if pending:
+            _, title = pending
+            topic = title
+        else:
+            # Фоллбэк: первые 100 символов текста
+            full_text = callback.message.text or ""
+            lines = full_text.split("\n", 2)
+            post_text = lines[2] if len(lines) > 2 else full_text
+            topic = post_text[:100]
 
         logger.info("Генерация картинки: topic=%r, kie_key=%s...",
                      topic[:30], config.kie_api_key[:8] if config.kie_api_key else "EMPTY")
