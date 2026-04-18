@@ -37,3 +37,7 @@ services:
         sync: false
       - key: PORT
         value: "8080"
+      - key: DATABASE_URL
+        sync: false
+      - key: KIE_API_KEY
+        sync: false

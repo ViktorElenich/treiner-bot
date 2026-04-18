@@ -25,7 +25,7 @@ from aiogram.webhook.aiohttp_server import (
 )
 
 from bot.config import load_config
-from bot.database import init_db
+from bot.database import init_db, close_pool
 from bot.handlers.ai_chat import router as ai_chat_router
 from bot.handlers.content import router as content_router
 from bot.handlers.moderation import router as moderation_router
@@ -67,6 +67,7 @@ async def on_shutdown(bot: Bot) -> None:
     переустанавливает его в on_startup, а промежуток «webhook отсутствует»
     создаёт риск гонки и потери сообщений.
     """
+    await close_pool()
     logger.info("Бот остановлен")
 
 

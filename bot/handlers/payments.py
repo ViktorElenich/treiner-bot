@@ -205,14 +205,10 @@ async def process_successful_payment(
         logger.error("Неизвестный тариф %s для платежа %s", tariff_id, payment_id)
         return
 
-    # Защита от дублей — если payment_id уже в БД, пропускаем
-    existing = await get_active_subscription(user_id)
-    if existing and existing.get("payment_id") == payment_id:
-        logger.info("Платёж %s уже обработан, пропускаю", payment_id)
-        return
-
-    # Сохраняем подписку
-    await save_subscription(
+    # Сохраняем подписку. Идемпотентно: UNIQUE(payment_id) + ON CONFLICT DO NOTHING.
+    # Если payment_id уже был — вернётся None, и мы выходим, не дублируя
+    # ссылки и уведомления тренеру (например, при ретрае webhook от ЮKassa).
+    sub_id = await save_subscription(
         user_id=user_id,
         username=username,
         full_name=full_name,
@@ -220,6 +216,9 @@ async def process_successful_payment(
         price=tariff["price"],
         payment_id=payment_id,
     )
+    if sub_id is None:
+        logger.info("Платёж %s уже обработан, пропускаю", payment_id)
+        return
 
     # Создаём invite-ссылки
     user_name = full_name or username or str(user_id)
