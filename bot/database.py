@@ -86,6 +86,19 @@ async def init_db() -> None:
                 PRIMARY KEY (chat_id, thread_id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ai_chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_chat_user "
+            "ON ai_chat_history(user_id, created_at)"
+        )
         await db.commit()
         logger.info("База данных инициализирована")
 
@@ -380,6 +393,56 @@ async def reset_warnings(user_id: int, chat_id: int) -> int:
         cursor = await db.execute(
             "DELETE FROM warnings WHERE user_id = ? AND chat_id = ?",
             (user_id, chat_id),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+# ── AI-чат (история диалогов) ────────────────────────────────────
+
+async def save_chat_message(user_id: int, role: str, text: str) -> None:
+    """Сохраняет сообщение AI-чата (role: 'user' или 'model')."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO ai_chat_history (user_id, role, text) VALUES (?, ?, ?)",
+            (user_id, role, text[:4000]),
+        )
+        await db.commit()
+
+
+async def get_chat_history(user_id: int, limit: int = 10) -> list:
+    """Возвращает последние N сообщений диалога в хронологическом порядке."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT role, text FROM ("
+            "  SELECT role, text, created_at FROM ai_chat_history"
+            "  WHERE user_id = ? ORDER BY created_at DESC LIMIT ?"
+            ") ORDER BY created_at ASC",
+            (user_id, limit),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def count_today_messages(user_id: int) -> int:
+    """Считает сообщения пользователя (role='user') за сегодня (UTC)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ai_chat_history "
+            "WHERE user_id = ? AND role = 'user' AND DATE(created_at) = DATE('now')",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def cleanup_old_chat_history(days: int = 30) -> int:
+    """Удаляет историю AI-чата старше N дней. Возвращает количество удалённых записей."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM ai_chat_history "
+            "WHERE created_at < datetime('now', ? || ' days')",
+            (f"-{days}",),
         )
         await db.commit()
         return cursor.rowcount

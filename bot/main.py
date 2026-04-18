@@ -26,6 +26,7 @@ from aiogram.webhook.aiohttp_server import (
 
 from bot.config import load_config
 from bot.database import init_db
+from bot.handlers.ai_chat import router as ai_chat_router
 from bot.handlers.content import router as content_router
 from bot.handlers.moderation import router as moderation_router
 from bot.handlers.payments import router as payments_router
@@ -88,6 +89,8 @@ def create_bot_and_dispatcher():
     dp.include_router(payments_router)
     # admin_router — команды /stats, /users, /extend (только для тренера)
     dp.include_router(admin_router)
+    # ai_chat_router — AI-бот для подписчиков ПРОГРЕСС и РЕЗУЛЬТАТ
+    dp.include_router(ai_chat_router)
     dp.include_router(start_router)
 
     # Настраиваем ЮKassa (если ключи заданы)
