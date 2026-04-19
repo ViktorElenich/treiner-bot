@@ -9,17 +9,25 @@
 """
 
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import load_config
 from bot.handlers.start import TARIFFS
 from bot.services.yukassa import create_payment, check_payment
 from bot.services.channel import create_invite_link, get_group_id_for_tariff
-from bot.database import get_active_subscription, save_subscription
+from bot.database import (
+    get_active_subscription,
+    save_subscription,
+    get_user_email,
+    save_user_email,
+)
 from bot.keyboards.inline import (
     back_to_menu_keyboard,
     payment_keyboard,
@@ -29,11 +37,19 @@ from bot.keyboards.inline import (
 router = Router()
 logger = logging.getLogger(__name__)
 
+# Простая валидация email — без RFC-педантизма
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class PaymentFlow(StatesGroup):
+    """FSM для сбора email перед оплатой (нужен для чека по 54-ФЗ)."""
+    waiting_email = State()
+
 
 # ── Кнопка "Оплатить" ───────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("pay_"))
-async def handle_pay(callback: CallbackQuery, bot: Bot):
+async def handle_pay(callback: CallbackQuery, bot: Bot, state: FSMContext):
     """Клиент нажал "Оплатить" на тарифе."""
     tariff_id = callback.data.replace("pay_", "")
     tariff = TARIFFS.get(tariff_id)
@@ -64,7 +80,80 @@ async def handle_pay(callback: CallbackQuery, bot: Bot):
             return
         # Подписка истекает через ≤3 дней — разрешаем продление
 
-    # Создаём платёж в ЮKassa
+    # Чек по 54-ФЗ требует email — проверяем, есть ли он в БД
+    email = await get_user_email(user.id)
+    if not email:
+        # Запоминаем выбранный тариф и просим ввести email
+        await state.set_state(PaymentFlow.waiting_email)
+        await state.update_data(tariff_id=tariff_id)
+        await callback.message.edit_text(
+            f"📧 <b>Нужен email для чека</b>\n\n"
+            f"По закону (54-ФЗ) при онлайн-оплате мы обязаны "
+            f"прислать электронный чек.\n\n"
+            f"Отправь свой email в ответном сообщении — сохраним, "
+            f"чтобы в следующий раз не спрашивать.",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    # Email есть — сразу создаём платёж
+    await _create_and_send_payment(
+        bot=bot,
+        message=callback.message,
+        user=user,
+        tariff_id=tariff_id,
+        email=email,
+    )
+    await callback.answer()
+
+
+@router.message(PaymentFlow.waiting_email, F.text)
+async def handle_email_input(message: Message, bot: Bot, state: FSMContext):
+    """Клиент прислал email после нажатия «Оплатить»."""
+    email = (message.text or "").strip().lower()
+
+    if not EMAIL_RE.match(email) or len(email) > 100:
+        await message.answer(
+            "❌ Это не похоже на email. Попробуй ещё раз — "
+            "например, <code>ivan@example.com</code>."
+        )
+        return
+
+    data = await state.get_data()
+    tariff_id = data.get("tariff_id")
+    await state.clear()
+
+    if not tariff_id or tariff_id not in TARIFFS:
+        await message.answer(
+            "Сессия оплаты истекла. Открой меню и выбери тариф заново.",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    await save_user_email(message.from_user.id, email)
+    await _create_and_send_payment(
+        bot=bot,
+        message=message,
+        user=message.from_user,
+        tariff_id=tariff_id,
+        email=email,
+    )
+
+
+async def _create_and_send_payment(bot: Bot, message, user,
+                                   tariff_id: str, email: str) -> None:
+    """
+    Создаёт платёж в ЮKassa и показывает клиенту кнопку перехода.
+
+    message — либо исходное сообщение бота (редактируем через edit_text,
+    если пришли из callback), либо новое сообщение пользователя
+    (тогда отвечаем через answer).
+    """
+    tariff = TARIFFS[tariff_id]
+    # Определяем как ответить: если `message` — это сообщение бота,
+    # которое мы показали после нажатия кнопки (callback), редактируем его.
+    # Если `message` — это ответ пользователя с email, шлём новое сообщение.
     try:
         me = await bot.get_me()
         result = await create_payment(
@@ -75,29 +164,37 @@ async def handle_pay(callback: CallbackQuery, bot: Bot):
             username=user.username or "",
             full_name=user.full_name or "",
             bot_username=me.username,
+            email=email,
         )
 
-        await callback.message.edit_text(
+        text = (
             f"💳 <b>Оплата тарифа {tariff['name']}</b>\n\n"
             f"Сумма: <b>{tariff['price']} ₽</b>\n"
-            f"Период: 30 дней\n\n"
+            f"Период: 30 дней\n"
+            f"Чек придёт на: {email}\n\n"
             "Нажми кнопку ниже для перехода к оплате.\n"
-            "После оплаты вернись сюда и нажми «Проверить оплату».",
-            reply_markup=payment_keyboard(
-                result["confirmation_url"], result["payment_id"]
-            ),
+            "После оплаты вернись сюда и нажми «Проверить оплату»."
         )
+        kb = payment_keyboard(result["confirmation_url"], result["payment_id"])
+
+        # Если сообщение пришло от бота (callback) — редактируем.
+        # Иначе (ответ клиента с email) — шлём новое сообщение.
+        if message.from_user and message.from_user.is_bot:
+            await message.edit_text(text, reply_markup=kb)
+        else:
+            await message.answer(text, reply_markup=kb)
 
     except Exception as e:
         logger.error("Ошибка создания платежа: %s", e)
-        await callback.message.edit_text(
+        error_text = (
             "❌ <b>Ошибка создания платежа</b>\n\n"
             "Попробуй позже или напиши тренеру:\n"
-            "👉 @ViktorElenich",
-            reply_markup=back_to_menu_keyboard(),
+            "👉 @ViktorElenich"
         )
-
-    await callback.answer()
+        if message.from_user and message.from_user.is_bot:
+            await message.edit_text(error_text, reply_markup=back_to_menu_keyboard())
+        else:
+            await message.answer(error_text, reply_markup=back_to_menu_keyboard())
 
 
 # ── Кнопка "Я оплатил — проверить" ──────────────────────────────

@@ -29,13 +29,21 @@ async def create_payment(
     username: str,
     full_name: str,
     bot_username: str,
+    email: str,
 ) -> dict:
     """
     Создаёт платёж в ЮKassa.
 
+    Формирует чек (54-ФЗ) для самозанятого:
+    - vat_code=1 — без НДС
+    - payment_mode=full_payment, payment_subject=service
+    - ЮKassa регистрирует чек в «Мой налог» через интеграцию с ФНС
+      (настройка в ЛК ЮKassa → Самозанятость).
+
     Возвращает:
         {"payment_id": "...", "confirmation_url": "..."}
     """
+    description = f"Онлайн-программа {tariff_name} — 30 дней"
 
     def _create():
         return Payment.create(
@@ -46,12 +54,28 @@ async def create_payment(
                     "return_url": f"https://t.me/{bot_username}",
                 },
                 "capture": True,
-                "description": f"Онлайн-программа {tariff_name} — 30 дней",
+                "description": description,
                 "metadata": {
                     "user_id": str(user_id),
                     "tariff": tariff_id,
                     "username": username,
                     "full_name": full_name,
+                },
+                "receipt": {
+                    "customer": {"email": email},
+                    "items": [
+                        {
+                            "description": description,
+                            "quantity": "1",
+                            "amount": {
+                                "value": f"{amount}.00",
+                                "currency": "RUB",
+                            },
+                            "vat_code": 1,
+                            "payment_mode": "full_payment",
+                            "payment_subject": "service",
+                        }
+                    ],
                 },
             },
             uuid.uuid4(),  # Ключ идемпотентности — защита от дублей

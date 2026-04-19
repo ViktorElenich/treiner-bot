@@ -145,6 +145,14 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_ai_chat_user "
             "ON ai_chat_history(user_id, created_at)"
         )
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_contacts (
+                user_id BIGINT PRIMARY KEY,
+                email TEXT,
+                phone TEXT,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
         logger.info("База данных инициализирована (PostgreSQL)")
 
 
@@ -433,6 +441,28 @@ async def count_today_messages(user_id: int) -> int:
         user_id,
     )
     return row["cnt"] if row else 0
+
+
+# ── Контакты пользователей (для чеков 54-ФЗ) ─────────────────────
+
+async def get_user_email(user_id: int) -> Optional[str]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT email FROM user_contacts WHERE user_id = $1",
+        user_id,
+    )
+    return row["email"] if row and row["email"] else None
+
+
+async def save_user_email(user_id: int, email: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO user_contacts (user_id, email, updated_at) "
+        "VALUES ($1, $2, now()) "
+        "ON CONFLICT (user_id) DO UPDATE "
+        "SET email = EXCLUDED.email, updated_at = now()",
+        user_id, email,
+    )
 
 
 async def cleanup_old_chat_history(days: int = 30) -> int:
