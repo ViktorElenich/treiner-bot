@@ -19,6 +19,7 @@ from bot.database import (
 )
 from bot.services.channel import get_group_id_for_tariff
 from bot.keyboards.inline import renew_subscription_keyboard, tariffs_keyboard
+from bot.handlers.autopost import send_daily_draft
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,11 @@ def start_scheduler(bot: Bot, config: Config) -> None:
     scheduler.add_job(
         notify_waitlist, "cron", day=20, hour=10, minute=15,
         args=[bot, config], id="notify_waitlist", replace_existing=True,
+    )
+    # Ежедневно в 8:30 МСК — черновик автопоста тренеру на одобрение
+    scheduler.add_job(
+        send_daily_draft, "cron", hour=8, minute=30,
+        args=[bot, config], id="daily_autopost", replace_existing=True,
     )
     scheduler.start()
     logger.info("Планировщик подписок запущен (ежедневно в 10:00 МСК)")

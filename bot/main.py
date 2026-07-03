@@ -27,6 +27,7 @@ from aiogram.webhook.aiohttp_server import (
 from bot.config import load_config
 from bot.database import init_db, close_pool
 from bot.handlers.ai_chat import router as ai_chat_router
+from bot.handlers.autopost import router as autopost_router
 from bot.handlers.content import router as content_router
 from bot.handlers.moderation import router as moderation_router
 from bot.handlers.payments import router as payments_router
@@ -86,6 +87,8 @@ def create_bot_and_dispatcher():
     dp.include_router(moderation_router)
     # content_router — генерация и публикация контента
     dp.include_router(content_router)
+    # autopost_router — ежедневный автопост с одобрением тренера
+    dp.include_router(autopost_router)
     # payments_router ПЕРЕД start_router — чтобы pay_* обрабатывался в payments.py
     dp.include_router(payments_router)
     # admin_router — команды /stats, /users, /extend (только для тренера)
