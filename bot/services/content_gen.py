@@ -67,6 +67,31 @@ ARTICLE_PROMPT = f"""Ты — фитнес-тренер Виктор с 13-ле�
 {COMMON_RULES}"""
 
 
+DICTATION_PROMPT = """Ты — редактор фитнес-тренера Виктора. Он надиктовал черновик поста для своего Telegram-чата{topic_hint}.
+
+Преобразуй надиктовку в готовый пост:
+- Убери слова-паразиты, оговорки, случайные повторы, обрывки фраз
+- Разбей на абзацы, поправь грамматику
+- СОХРАНИ манеру и формулировки Виктора: его связки («то есть», «соответственно», «допустим», «смотри»), обращение на «ты», порядок мыслей
+- НИЧЕГО не добавляй от себя — никаких фактов, советов и выводов, которых нет в надиктовке
+- НЕ используй Markdown-разметку (**, ##, списки с * или -)
+- Эмодзи: максимум 1-2, только если уместно
+- На русском языке
+
+Формат ответа:
+Первая строка — короткий заголовок темы (3-6 слов, без точки в конце)
+Пустая строка
+Далее — текст поста"""
+
+
+def _parse_title_and_text(raw: str) -> tuple:
+    """Первая строка — заголовок, дальше — текст поста."""
+    lines = raw.split("\n", 2)
+    title = lines[0].strip()
+    text = lines[2].strip() if len(lines) > 2 else raw
+    return title, text
+
+
 def _build_prompt(base_prompt: str, past_titles: list) -> str:
     if not past_titles:
         return base_prompt
@@ -96,15 +121,53 @@ async def generate_content(
             contents=prompt,
         )
         raw = response.text.strip()
-        lines = raw.split("\n", 2)
-        title = lines[0].strip()
-        text = lines[2].strip() if len(lines) > 2 else raw
+        title, text = _parse_title_and_text(raw)
         logger.info("Контент сгенерирован: type=%s, title=%r, length=%d", content_type, title, len(text))
         return title, text
 
     except Exception as e:
         logger.error("Ошибка генерации контента: %s", e)
         return "", f"❌ Ошибка генерации: {e}"
+
+
+async def structure_dictation(
+    api_key: str,
+    text: Optional[str] = None,
+    audio: Optional[bytes] = None,
+    audio_mime: str = "audio/ogg",
+    topic: Optional[str] = None,
+) -> tuple:
+    """
+    Превращает надиктовку тренера (голосовое или текст) в оформленный пост.
+
+    text: надиктовка текстом, ИЛИ
+    audio: байты голосового сообщения (Gemini расшифровывает сам)
+    topic: тема-подсказка (не обязательно)
+    Возвращает (title, text) или ("", "❌ Ошибка...") при ошибке.
+    """
+    topic_hint = f" на тему «{topic}»" if topic else ""
+    prompt = DICTATION_PROMPT.format(topic_hint=topic_hint)
+
+    contents = [prompt]
+    if audio:
+        contents.append(types.Part.from_bytes(data=audio, mime_type=audio_mime))
+    else:
+        contents.append(f"Надиктовка (текстом):\n{text}")
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=contents,
+        )
+        raw = response.text.strip()
+        title, post_text = _parse_title_and_text(raw)
+        logger.info("Надиктовка оформлена: title=%r, length=%d", title, len(post_text))
+        return title, post_text
+
+    except Exception as e:
+        logger.error("Ошибка оформления надиктовки: %s", e)
+        return "", f"❌ Ошибка оформления: {e}"
 
 
 async def generate_image(topic: str, kie_api_key: str) -> Optional[bytes]:

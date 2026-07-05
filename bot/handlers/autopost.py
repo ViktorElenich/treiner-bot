@@ -8,10 +8,15 @@
 4. Тренер жмёт «Опубликовать» — пост уходит в тему общего чата
    (питание → тема «Питание», тренировки → тема «Статьи о спорте»)
 
+Дополнительно: кнопка «🎤 Надиктую сам» — тренер отправляет голосовое
+(или текст), Gemini расшифровывает и оформляет его слова в пост,
+дальше то же одобрение.
+
 Черновики живут в памяти: после редеплоя кнопки старого черновика
 перестают работать — тогда тренер запускает /autopost вручную.
 """
 
+import io
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -26,13 +31,16 @@ from aiogram.filters import Command
 
 from bot.config import Config, load_config
 from bot.database import get_content_titles, save_content_title
-from bot.services.content_gen import generate_content, generate_image
+from bot.services.content_gen import generate_content, generate_image, structure_dictation
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 # message_id (сообщение с кнопками у тренера) → черновик
 _drafts: dict = {}
+
+# user_id тренера → {"content_type", "topic"} — ждём надиктовку
+_dictation: dict = {}
 
 # Telegram: подпись к фото не длиннее 1024 символов
 CAPTION_LIMIT = 1024
@@ -57,7 +65,8 @@ def draft_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔄 Переделать", callback_data="autopost_regen"),
         ],
         [
-            InlineKeyboardButton(text="⏭ Пропустить сегодня", callback_data="autopost_skip"),
+            InlineKeyboardButton(text="🎤 Надиктую сам", callback_data="autopost_dictate"),
+            InlineKeyboardButton(text="⏭ Пропустить", callback_data="autopost_skip"),
         ],
     ])
 
@@ -65,7 +74,6 @@ def draft_keyboard() -> InlineKeyboardMarkup:
 async def send_daily_draft(bot: Bot, config: Config, content_type: str = None) -> None:
     """Генерирует пост + картинку и присылает тренеру на одобрение."""
     content_type = content_type or _today_content_type()
-    emoji, label = _labels(content_type)
 
     past_titles = await get_content_titles(content_type)
     title, text = await generate_content(content_type, config.gemini_api_key, past_titles)
@@ -78,6 +86,24 @@ async def send_daily_draft(bot: Bot, config: Config, content_type: str = None) -
             parse_mode=None,
         )
         return
+
+    await _send_preview(bot, config, content_type, title, text)
+
+
+async def _send_preview(
+    bot: Bot,
+    config: Config,
+    content_type: str,
+    title: str,
+    text: str,
+    source: dict = None,
+) -> None:
+    """Генерирует картинку и присылает тренеру превью с кнопками.
+
+    source — исходная надиктовка тренера (если пост из неё):
+    {"text": ...} или {"audio": bytes, "mime": ...}. Нужна для «Переделать».
+    """
+    emoji, label = _labels(content_type)
 
     # Картинка (может занять до 2 минут; при ошибке публикуем без неё)
     photo_file_id = None
@@ -95,10 +121,11 @@ async def send_daily_draft(bot: Bot, config: Config, content_type: str = None) -
             text="⚠️ Картинка не сгенерировалась — пост будет без неё.",
         )
 
+    header = "Пост из твоей надиктовки" if source else f"Пост на сегодня — о {label}"
     sent = await bot.send_message(
         chat_id=config.admin_chat_id,
         text=(
-            f"{emoji} Пост на сегодня — о {label}.\n"
+            f"{emoji} {header}.\n"
             f"Проверь и жми кнопку:\n\n{text}"
         ),
         reply_markup=draft_keyboard(),
@@ -109,8 +136,10 @@ async def send_daily_draft(bot: Bot, config: Config, content_type: str = None) -
         "title": title,
         "text": text,
         "photo_file_id": photo_file_id,
+        "source": source,
     }
-    logger.info("Автопост-черновик отправлен тренеру: type=%s, title=%r", content_type, title)
+    logger.info("Автопост-черновик отправлен тренеру: type=%s, title=%r, source=%s",
+                content_type, title, "надиктовка" if source else "генерация")
 
 
 # ── Команда /autopost — сгенерировать черновик вручную ──────────
@@ -218,7 +247,124 @@ async def cb_regen(callback: CallbackQuery, bot: Bot):
 
     await callback.answer("Переделываю (до 2-3 минут)...")
     await callback.message.edit_text("⏳ Генерирую новый вариант...")
-    await send_daily_draft(bot, config, draft["content_type"])
+
+    source = draft.get("source")
+    if source:
+        # Пост из надиктовки — заново оформляем те же слова тренера
+        title, text = await structure_dictation(
+            config.gemini_api_key,
+            text=source.get("text"),
+            audio=source.get("audio"),
+            audio_mime=source.get("mime", "audio/ogg"),
+        )
+        if not title:
+            await bot.send_message(
+                chat_id=config.admin_chat_id,
+                text=f"⚠️ Не получилось переделать.\n{text}",
+                parse_mode=None,
+            )
+            return
+        await _send_preview(bot, config, draft["content_type"], title, text, source=source)
+    else:
+        await send_daily_draft(bot, config, draft["content_type"])
+
+
+# ── Callback: надиктую сам ───────────────────────────────────────
+
+@router.callback_query(F.data == "autopost_dictate")
+async def cb_dictate(callback: CallbackQuery):
+    """Тренер хочет надиктовать пост сам — ждём голосовое или текст."""
+    config = load_config()
+    if callback.from_user.id != config.admin_chat_id:
+        await callback.answer("Только для тренера", show_alert=True)
+        return
+
+    # Черновик НЕ убираем: можно передумать и опубликовать авто-вариант
+    draft = _drafts.get(callback.message.message_id)
+    content_type = draft["content_type"] if draft else _today_content_type()
+    topic = draft["title"] if draft else None
+
+    _dictation[callback.from_user.id] = {"content_type": content_type}
+
+    topic_line = f"Можно на тему «{topic}», можно на любую свою.\n" if topic else ""
+    await callback.message.answer(
+        "🎤 Жду голосовое сообщение (или текст).\n"
+        f"{topic_line}"
+        "Говори как думаешь — я уберу оговорки и повторы, оформлю "
+        "в пост и пришлю на проверку.\n\n"
+        "Передумал — напиши «отмена».",
+        parse_mode=None,
+    )
+    await callback.answer()
+
+
+# ── Приём надиктовки (голосовое или текст от тренера) ────────────
+
+def _awaiting_dictation(message: Message) -> bool:
+    if (
+        message.chat.type != "private"
+        or message.from_user is None
+        or message.from_user.id not in _dictation
+    ):
+        return False
+    # Команды пропускаем дальше (кроме /cancel) — чтобы /autopost, /stats
+    # и прочие работали даже пока ждём надиктовку
+    if message.text and message.text.startswith("/"):
+        return message.text.strip().lower() == "/cancel"
+    return True
+
+
+@router.message(_awaiting_dictation)
+async def on_dictation(message: Message, bot: Bot):
+    config = load_config()
+
+    # Отмена
+    if message.text and message.text.strip().lower() in ("отмена", "/cancel", "cancel"):
+        _dictation.pop(message.from_user.id, None)
+        await message.answer("Ок, отменил. Кнопки на автопосте выше по-прежнему работают.")
+        return
+
+    state = _dictation.pop(message.from_user.id, None)
+    if state is None:
+        return
+    content_type = state["content_type"]
+
+    # Собираем источник: голос / аудио / текст
+    source = None
+    if message.voice:
+        buf = io.BytesIO()
+        await bot.download(message.voice, destination=buf)
+        source = {"audio": buf.getvalue(), "mime": "audio/ogg"}
+    elif message.audio:
+        buf = io.BytesIO()
+        await bot.download(message.audio, destination=buf)
+        source = {"audio": buf.getvalue(), "mime": message.audio.mime_type or "audio/mpeg"}
+    elif message.text:
+        source = {"text": message.text}
+
+    if not source:
+        _dictation[message.from_user.id] = state  # ждём дальше
+        await message.answer("Пришли голосовое сообщение или обычный текст.")
+        return
+
+    await message.answer("⏳ Расшифровываю и оформляю (пара минут)...")
+
+    title, text = await structure_dictation(
+        config.gemini_api_key,
+        text=source.get("text"),
+        audio=source.get("audio"),
+        audio_mime=source.get("mime", "audio/ogg"),
+    )
+
+    if not title:
+        _dictation[message.from_user.id] = state  # можно попробовать ещё раз
+        await message.answer(
+            f"⚠️ Не получилось оформить.\n{text}\n\nПопробуй отправить ещё раз или напиши «отмена».",
+            parse_mode=None,
+        )
+        return
+
+    await _send_preview(bot, config, content_type, title, text, source=source)
 
 
 # ── Callback: пропустить ─────────────────────────────────────────
