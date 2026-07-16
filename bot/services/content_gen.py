@@ -15,6 +15,57 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
+MODEL = "gemini-3.1-flash-lite-preview"
+
+# Ошибки Gemini, которые лечатся повтором через паузу.
+# «User location is not supported» — Google иногда неверно определяет
+# страну по IP серверов Render; ошибка плавающая, повтор обычно проходит.
+_TRANSIENT_MARKERS = (
+    "user location is not supported",
+    "failed_precondition",
+    "resource_exhausted",
+    "unavailable",
+    "overloaded",
+    "deadline",
+    "timeout",
+    "429",
+    "500",
+    "503",
+)
+
+
+def _is_transient(error: Exception) -> bool:
+    msg = str(error).lower()
+    return any(marker in msg for marker in _TRANSIENT_MARKERS)
+
+
+async def _call_gemini(api_key: str, contents, attempts: int = 4) -> str:
+    """
+    Вызов Gemini с повторами при временных ошибках.
+    Паузы между попытками: 5, 15, 45 сек.
+    Возвращает текст ответа, при неудаче бросает последнюю ошибку.
+    """
+    delay = 5
+    for attempt in range(1, attempts + 1):
+        try:
+            client = genai.Client(api_key=api_key)
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL,
+                contents=contents,
+            )
+            return response.text.strip()
+        except Exception as e:
+            if attempt == attempts or not _is_transient(e):
+                raise
+            logger.warning(
+                "Gemini временная ошибка (попытка %d/%d), повтор через %d сек: %s",
+                attempt, attempts, delay, e,
+            )
+            await asyncio.sleep(delay)
+            delay *= 3
+
+
 # ── Промпты для генерации ────────────────────────────────────────
 
 # Расшифровки голосовых Виктора — образцы его живой речи.
@@ -115,12 +166,7 @@ async def generate_content(
     prompt = _build_prompt(base, past_titles or [])
 
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
-            contents=prompt,
-        )
-        raw = response.text.strip()
+        raw = await _call_gemini(api_key, prompt)
         title, text = _parse_title_and_text(raw)
         logger.info("Контент сгенерирован: type=%s, title=%r, length=%d", content_type, title, len(text))
         return title, text
@@ -155,12 +201,7 @@ async def structure_dictation(
         contents.append(f"Надиктовка (текстом):\n{text}")
 
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
-            contents=contents,
-        )
-        raw = response.text.strip()
+        raw = await _call_gemini(api_key, contents)
         title, post_text = _parse_title_and_text(raw)
         logger.info("Надиктовка оформлена: title=%r, length=%d", title, len(post_text))
         return title, post_text

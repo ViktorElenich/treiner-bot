@@ -16,6 +16,7 @@
 перестают работать — тогда тренер запускает /autopost вручную.
 """
 
+import asyncio
 import io
 import logging
 from datetime import datetime
@@ -45,6 +46,12 @@ _dictation: dict = {}
 # Telegram: подпись к фото не длиннее 1024 символов
 CAPTION_LIMIT = 1024
 
+# Если утренняя генерация не удалась — повторяем через 30 минут (до 2 раз)
+RETRY_DELAY_SEC = 30 * 60
+
+# Держим ссылки на фоновые задачи повтора, чтобы их не съел сборщик мусора
+_retry_tasks: set = set()
+
 
 def _today_content_type() -> str:
     """Чётный день года — питание, нечётный — тренировки (МСК)."""
@@ -71,8 +78,18 @@ def draft_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-async def send_daily_draft(bot: Bot, config: Config, content_type: str = None) -> None:
-    """Генерирует пост + картинку и присылает тренеру на одобрение."""
+async def send_daily_draft(
+    bot: Bot,
+    config: Config,
+    content_type: str = None,
+    retries_left: int = 2,
+) -> None:
+    """Генерирует пост + картинку и присылает тренеру на одобрение.
+
+    retries_left — сколько ещё раз автоматически повторить через 30 минут,
+    если генерация не удалась (Gemini иногда временно отклоняет запросы
+    с серверов Render). Для ручного запуска /autopost повторы отключены.
+    """
     content_type = content_type or _today_content_type()
 
     past_titles = await get_content_titles(content_type)
@@ -80,14 +97,41 @@ async def send_daily_draft(bot: Bot, config: Config, content_type: str = None) -
 
     if not title:
         # generate_content вернул ошибку в text
-        await bot.send_message(
-            chat_id=config.admin_chat_id,
-            text=f"⚠️ Автопост: не получилось сгенерировать текст.\n{text}",
-            parse_mode=None,
-        )
+        if retries_left > 0:
+            await bot.send_message(
+                chat_id=config.admin_chat_id,
+                text=(
+                    "⚠️ Автопост: Google временно не отвечает, "
+                    "попробую ещё раз через 30 минут — ничего делать не нужно.\n"
+                    f"{text}"
+                ),
+                parse_mode=None,
+            )
+            task = asyncio.create_task(
+                _retry_later(bot, config, content_type, retries_left - 1)
+            )
+            _retry_tasks.add(task)
+            task.add_done_callback(_retry_tasks.discard)
+        else:
+            await bot.send_message(
+                chat_id=config.admin_chat_id,
+                text=(
+                    "⚠️ Автопост: не получилось сгенерировать текст.\n"
+                    f"{text}\n\n"
+                    "Можно попробовать вручную позже — команда /autopost."
+                ),
+                parse_mode=None,
+            )
         return
 
     await _send_preview(bot, config, content_type, title, text)
+
+
+async def _retry_later(bot: Bot, config: Config, content_type: str, retries_left: int) -> None:
+    """Ждёт 30 минут и пробует сгенерировать автопост ещё раз."""
+    await asyncio.sleep(RETRY_DELAY_SEC)
+    logger.info("Автопост: повторная попытка генерации (осталось повторов: %d)", retries_left)
+    await send_daily_draft(bot, config, content_type, retries_left=retries_left)
 
 
 async def _send_preview(
@@ -155,7 +199,7 @@ async def cmd_autopost(message: Message, bot: Bot):
     content_type = parts[1] if len(parts) > 1 and parts[1] in ("nutrition", "article") else None
 
     await message.answer("⏳ Генерирую пост и картинку (до 2-3 минут)...")
-    await send_daily_draft(bot, config, content_type)
+    await send_daily_draft(bot, config, content_type, retries_left=0)
 
 
 # ── Callback: опубликовать ───────────────────────────────────────
@@ -266,7 +310,7 @@ async def cb_regen(callback: CallbackQuery, bot: Bot):
             return
         await _send_preview(bot, config, draft["content_type"], title, text, source=source)
     else:
-        await send_daily_draft(bot, config, draft["content_type"])
+        await send_daily_draft(bot, config, draft["content_type"], retries_left=0)
 
 
 # ── Callback: надиктую сам ───────────────────────────────────────
