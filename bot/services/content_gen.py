@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Optional
 
 import aiohttp
@@ -15,7 +16,24 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gemini-3.1-flash-lite-preview"
+# Модель можно сменить через env GEMINI_MODEL без правки кода
+# (запасной вариант, если preview-модель отключат: gemini-2.5-flash-lite)
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+
+
+def _make_client(api_key: str) -> "genai.Client":
+    """
+    Клиент Gemini. Если задан env GEMINI_BASE_URL — запросы идут через
+    прокси (Cloudflare Worker): Google блокирует IP дата-центров Render
+    (403 Forbidden), а IP Cloudflare — нет.
+    """
+    base_url = os.environ.get("GEMINI_BASE_URL", "").strip().rstrip("/")
+    if base_url:
+        return genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(base_url=base_url),
+        )
+    return genai.Client(api_key=api_key)
 
 # Ошибки Gemini, которые лечатся повтором через паузу.
 # «User location is not supported» — Google иногда неверно определяет
@@ -48,7 +66,7 @@ async def _call_gemini(api_key: str, contents, attempts: int = 4) -> str:
     delay = 5
     for attempt in range(1, attempts + 1):
         try:
-            client = genai.Client(api_key=api_key)
+            client = _make_client(api_key)
             response = await asyncio.to_thread(
                 client.models.generate_content,
                 model=MODEL,
