@@ -114,6 +114,14 @@ async def init_db() -> None:
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS research_sources (
+                pmid TEXT PRIMARY KEY,
+                content_type TEXT NOT NULL,
+                article_title TEXT NOT NULL,
+                used_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS waitlist (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL UNIQUE,
@@ -371,6 +379,31 @@ async def get_content_titles(content_type: str, limit: int = 20) -> list:
         content_type, limit,
     )
     return [r["title"] for r in rows]
+
+
+async def get_used_research_pmids(limit: int = 500) -> set[str]:
+    """Возвращает PubMed-статьи, уже опубликованные ботом."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT pmid FROM research_sources ORDER BY used_at DESC LIMIT $1",
+        limit,
+    )
+    return {r["pmid"] for r in rows}
+
+
+async def save_research_sources(
+    content_type: str,
+    sources: list[tuple[str, str]],
+) -> None:
+    """Помечает источники опубликованного дайджеста, чтобы не повторять их."""
+    if not sources:
+        return
+    pool = await get_pool()
+    await pool.executemany(
+        "INSERT INTO research_sources (pmid, content_type, article_title) "
+        "VALUES ($1, $2, $3) ON CONFLICT (pmid) DO NOTHING",
+        [(pmid, content_type, title) for pmid, title in sources],
+    )
 
 
 # ── Защищённые темы ──────────────────────────────────────────────

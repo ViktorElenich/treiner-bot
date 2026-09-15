@@ -1,11 +1,11 @@
 """
-Автопубликация постов в общий чат.
+Автопубликация дайджестов исследований в общий чат.
 
 Поток:
 1. Планировщик каждый день в 8:30 МСК вызывает send_daily_draft
 2. Чередование по дню: чётный день года — питание, нечётный — тренировки
-3. Бот генерирует текст + картинку и присылает тренеру с кнопками
-4. Тренер жмёт «Опубликовать» — пост уходит в тему общего чата
+3. Бот находит свежие статьи PubMed, готовит текст и присылает тренеру
+4. Тренер жмёт «Опубликовать» — дайджест уходит в тему общего чата
    (питание → тема «Питание», тренировки → тема «Статьи о спорте»)
 
 Дополнительно: кнопка «🎤 Надиктую сам» — тренер отправляет голосовое
@@ -26,13 +26,16 @@ from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardButton, InlineKeyboardMarkup,
-    BufferedInputFile,
 )
 from aiogram.filters import Command
 
 from bot.config import Config, load_config
-from bot.database import get_content_titles, save_content_title
-from bot.services.content_gen import generate_content, generate_image, structure_dictation
+from bot.database import (
+    get_content_titles,
+    save_content_title,
+    save_research_sources,
+)
+from bot.services.content_gen import generate_content, structure_dictation
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -42,9 +45,6 @@ _drafts: dict = {}
 
 # user_id тренера → {"content_type", "topic"} — ждём надиктовку
 _dictation: dict = {}
-
-# Telegram: подпись к фото не длиннее 1024 символов
-CAPTION_LIMIT = 1024
 
 # Если утренняя генерация не удалась — повторяем через 30 минут (до 2 раз)
 RETRY_DELAY_SEC = 30 * 60
@@ -83,8 +83,9 @@ async def send_daily_draft(
     config: Config,
     content_type: str = None,
     retries_left: int = 2,
+    excluded_pmids: set[str] | None = None,
 ) -> None:
-    """Генерирует пост + картинку и присылает тренеру на одобрение.
+    """Готовит дайджест исследований и присылает тренеру на одобрение.
 
     retries_left — сколько ещё раз автоматически повторить через 30 минут,
     если генерация не удалась (Gemini иногда временно отклоняет запросы
@@ -93,7 +94,12 @@ async def send_daily_draft(
     content_type = content_type or _today_content_type()
 
     past_titles = await get_content_titles(content_type)
-    title, text = await generate_content(content_type, config.gemini_api_key, past_titles)
+    title, text, research_sources = await generate_content(
+        content_type,
+        config.gemini_api_key,
+        past_titles,
+        excluded_pmids=excluded_pmids,
+    )
 
     if not title:
         # generate_content вернул ошибку в text
@@ -101,7 +107,7 @@ async def send_daily_draft(
             await bot.send_message(
                 chat_id=config.admin_chat_id,
                 text=(
-                    "⚠️ Автопост: Google временно не отвечает, "
+                    "⚠️ Автопост: не удалось подготовить дайджест, "
                     "попробую ещё раз через 30 минут — ничего делать не нужно.\n"
                     f"{text}"
                 ),
@@ -116,7 +122,7 @@ async def send_daily_draft(
             await bot.send_message(
                 chat_id=config.admin_chat_id,
                 text=(
-                    "⚠️ Автопост: не получилось сгенерировать текст.\n"
+                    "⚠️ Автопост: не получилось подготовить дайджест.\n"
                     f"{text}\n\n"
                     "Можно попробовать вручную позже — команда /autopost."
                 ),
@@ -124,7 +130,7 @@ async def send_daily_draft(
             )
         return
 
-    await _send_preview(bot, config, content_type, title, text)
+    await _send_preview(bot, content_type, title, text, research_sources=research_sources)
 
 
 async def _retry_later(bot: Bot, config: Config, content_type: str, retries_left: int) -> None:
@@ -136,36 +142,20 @@ async def _retry_later(bot: Bot, config: Config, content_type: str, retries_left
 
 async def _send_preview(
     bot: Bot,
-    config: Config,
     content_type: str,
     title: str,
     text: str,
     source: dict = None,
+    research_sources: list = None,
 ) -> None:
-    """Генерирует картинку и присылает тренеру превью с кнопками.
+    """Присылает тренеру превью дайджеста или оформленной надиктовки.
 
     source — исходная надиктовка тренера (если пост из неё):
     {"text": ...} или {"audio": bytes, "mime": ...}. Нужна для «Переделать».
     """
+    config = load_config()
     emoji, label = _labels(content_type)
-
-    # Картинка (может занять до 2 минут; при ошибке публикуем без неё)
-    photo_file_id = None
-    image_data = await generate_image(title, config.kie_api_key)
-    if image_data:
-        photo_msg = await bot.send_photo(
-            chat_id=config.admin_chat_id,
-            photo=BufferedInputFile(image_data, filename="post_image.jpg"),
-            caption="🖼 Картинка к сегодняшнему посту",
-        )
-        photo_file_id = photo_msg.photo[-1].file_id
-    else:
-        await bot.send_message(
-            chat_id=config.admin_chat_id,
-            text="⚠️ Картинка не сгенерировалась — пост будет без неё.",
-        )
-
-    header = "Пост из твоей надиктовки" if source else f"Пост на сегодня — о {label}"
+    header = "Пост из твоей надиктовки" if source else f"Свежие исследования о {label}"
     sent = await bot.send_message(
         chat_id=config.admin_chat_id,
         text=(
@@ -179,8 +169,8 @@ async def _send_preview(
         "content_type": content_type,
         "title": title,
         "text": text,
-        "photo_file_id": photo_file_id,
         "source": source,
+        "research_sources": research_sources or [],
     }
     logger.info("Автопост-черновик отправлен тренеру: type=%s, title=%r, source=%s",
                 content_type, title, "надиктовка" if source else "генерация")
@@ -198,7 +188,7 @@ async def cmd_autopost(message: Message, bot: Bot):
     parts = (message.text or "").split()
     content_type = parts[1] if len(parts) > 1 and parts[1] in ("nutrition", "article") else None
 
-    await message.answer("⏳ Генерирую пост и картинку (до 2-3 минут)...")
+    await message.answer("⏳ Ищу свежие исследования и готовлю дайджест (до 2 минут)...")
     await send_daily_draft(bot, config, content_type, retries_left=0)
 
 
@@ -230,27 +220,12 @@ async def cb_publish(callback: CallbackQuery, bot: Bot):
 
     await callback.answer("Публикую...")
     try:
-        if draft["photo_file_id"] and len(text) <= CAPTION_LIMIT:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=draft["photo_file_id"],
-                caption=text,
-                message_thread_id=thread_id,
-                parse_mode=None,
-            )
-        else:
-            if draft["photo_file_id"]:
-                await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=draft["photo_file_id"],
-                    message_thread_id=thread_id,
-                )
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                message_thread_id=thread_id,
-                parse_mode=None,
-            )
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=thread_id,
+            parse_mode=None,
+        )
     except Exception as e:
         logger.error("Не удалось опубликовать автопост: %s", e, exc_info=True)
         _drafts[callback.message.message_id] = draft  # вернуть, чтобы можно было повторить
@@ -263,6 +238,11 @@ async def cb_publish(callback: CallbackQuery, bot: Bot):
 
     if draft["title"]:
         await save_content_title(draft["content_type"], draft["title"])
+    if draft["research_sources"]:
+        await save_research_sources(
+            draft["content_type"],
+            [(paper.pmid, paper.title) for paper in draft["research_sources"]],
+        )
 
     emoji, label = _labels(draft["content_type"])
     await callback.message.edit_text(
@@ -308,9 +288,15 @@ async def cb_regen(callback: CallbackQuery, bot: Bot):
                 parse_mode=None,
             )
             return
-        await _send_preview(bot, config, draft["content_type"], title, text, source=source)
+        await _send_preview(bot, draft["content_type"], title, text, source=source)
     else:
-        await send_daily_draft(bot, config, draft["content_type"], retries_left=0)
+        await send_daily_draft(
+            bot,
+            config,
+            draft["content_type"],
+            retries_left=0,
+            excluded_pmids={paper.pmid for paper in draft["research_sources"]},
+        )
 
 
 # ── Callback: надиктую сам ───────────────────────────────────────
@@ -408,7 +394,7 @@ async def on_dictation(message: Message, bot: Bot):
         )
         return
 
-    await _send_preview(bot, config, content_type, title, text, source=source)
+    await _send_preview(bot, content_type, title, text, source=source)
 
 
 # ── Callback: пропустить ─────────────────────────────────────────

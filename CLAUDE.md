@@ -4,9 +4,9 @@
 
 ## Что это
 
-Telegram-бот `@viktortreiner_bot` для фитнес-тренера Виктора — подписки, платежи ЮKassa, генерация контента (Gemini + Kie AI), модерация групп, админ-панель.
+Telegram-бот `@viktortreiner_bot` для фитнес-тренера Виктора — подписки, платежи ЮKassa, дайджесты свежих исследований PubMed через Gemini, модерация групп, админ-панель.
 
-- **Python 3.11**, aiogram 3.15, aiohttp, aiosqlite, APScheduler, yookassa
+- **Python 3.11**, aiogram 3.15, aiohttp, asyncpg, APScheduler, yookassa
 - **Деплой:** Render (webhook-режим)
 - **Локальная разработка:** polling-режим (если `WEBHOOK_BASE_URL` не задан)
 - **Точка входа:** `python -m bot.main`
@@ -83,7 +83,7 @@ curl https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo
 
 ## Автопубликация постов
 
-Файл: `bot/handlers/autopost.py`. Ежедневно в **8:30 МСК** планировщик генерирует пост (чётный день года — питание, нечётный — тренировки), картинку через Kie AI и присылает тренеру с кнопками «Опубликовать / Переделать / Пропустить». По кнопке пост уходит в общий чат (`GROUP_GENERAL_ID`): питание → топик `TOPIC_NUTRITION_ID`, тренировки → `TOPIC_ARTICLES_ID`. Ручной запуск: `/autopost` (опционально `/autopost nutrition` или `/autopost article`).
+Файл: `bot/handlers/autopost.py`. Ежедневно в **8:30 МСК** планировщик готовит дайджест свежих публикаций PubMed (чётный день года — питание, нечётный — тренировки) и присылает тренеру с кнопками «Опубликовать / Переделать / Пропустить». В дайджест попадают только статьи с аннотацией: РКИ, систематические обзоры и метаанализы за последний год. Gemini объясняет их только по данным аннотаций, а бот добавляет прямые ссылки на PubMed и DOI. По кнопке выпуск уходит в общий чат (`GROUP_GENERAL_ID`): питание → топик `TOPIC_NUTRITION_ID`, тренировки → `TOPIC_ARTICLES_ID`. Ручной запуск: `/autopost` (опционально `/autopost nutrition` или `/autopost article`). Изображения больше не создаются.
 
 Кнопка «🎤 Надиктую сам»: бот ждёт голосовое или текст от тренера (состояние `_dictation`), Gemini расшифровывает аудио напрямую и оформляет надиктовку в пост (`structure_dictation` в `content_gen.py`) — без выдумывания фактов, с сохранением манеры. Дальше то же превью с кнопками; «Переделать» у такого поста заново оформляет ту же надиктовку (исходник хранится в `draft["source"]`), а не генерирует с нуля.
 
@@ -93,7 +93,7 @@ curl https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo
 
 **Прокси через Cloudflare (июль 2026):** Google начал отдавать с IP Render жёсткий `403 Forbidden` (HTML-страница «Your client does not have permission to get URL») — блок IP дата-центров, ретраи не помогают. Решение: запросы к Gemini идут через Cloudflare Worker-прокси (`cloudflare/gemini-proxy-worker.js`, задеплоен на аккаунте Cloudflare Виктора — том же, где живёт его личный ассистент fitness-bot). Включается переменной `GEMINI_BASE_URL` на Render (адрес worker'а); если переменная пустая — бот ходит к Google напрямую. Модель задаётся `GEMINI_MODEL` (по умолчанию `gemini-3.1-flash-lite-preview`; запасная стабильная — `gemini-2.5-flash-lite`).
 
-Промпты в `bot/services/content_gen.py` содержат **образцы живой речи Виктора** (`STYLE_SAMPLES` — расшифровки его голосовых) и антиИИ-правила (`COMMON_RULES`). Не выкидывай образцы при правках промпта — они дают основной эффект «человеческого» текста.
+В `bot/services/content_gen.py` PubMed используется как источник фактов, а промпт запрещает Gemini добавлять сведения, которых нет в аннотации исследования. Уже опубликованные PMID сохраняются в таблице `research_sources`, поэтому бот не повторяет один и тот же источник.
 
 ## Структура кода
 
@@ -102,13 +102,13 @@ bot/
   main.py              — точка входа, webhook/polling, health endpoint
   config.py            — env vars, admin_chat_id, group IDs, токены
   database.py          — все функции БД (subscriptions, leads, waitlist,
-                         warnings, content_history, protected_topics)
+                         warnings, content_history, research_sources, protected_topics)
   handlers/
     start.py           — /start, главное меню
     payments.py        — ЮKassa: инвойсы, подтверждения
     admin.py           — /stats, /users, /extend (только тренер)
-    content.py         — генерация контента (Gemini + Kie AI)
-    autopost.py        — ежедневный автопост с одобрением тренера
+    content.py         — ручная подготовка дайджестов исследований
+    autopost.py        — ежедневный дайджест исследований с одобрением тренера
     moderation.py      — мат-фильтр + защита тем
   services/
     scheduler.py       — APScheduler: проверка истекающих подписок,
@@ -122,7 +122,7 @@ bot/
 
 ## Env vars (Render)
 
-Критичные: `BOT_TOKEN`, `ADMIN_CHAT_ID`, `WEBHOOK_BASE_URL` (без trailing slash), `WEBHOOK_SECRET`, `YUKASSA_SHOP_ID`, `YUKASSA_SECRET_KEY`, `GROUP_GENERAL_ID`, `GROUP_START_ID`, `GROUP_PROGRESS_ID`, `GROUP_RESULT_ID`, `GEMINI_API_KEY`, `KIE_API_KEY`.
+Критичные: `BOT_TOKEN`, `ADMIN_CHAT_ID`, `WEBHOOK_BASE_URL` (без trailing slash), `WEBHOOK_SECRET`, `YUKASSA_SHOP_ID`, `YUKASSA_SECRET_KEY`, `GROUP_GENERAL_ID`, `GROUP_START_ID`, `GROUP_PROGRESS_ID`, `GROUP_RESULT_ID`, `GEMINI_API_KEY`, `DATABASE_URL`. Для PubMed можно необязательно задать `NCBI_EMAIL` — это контакт разработчика для запросов к научной базе.
 
 ## Платежи
 

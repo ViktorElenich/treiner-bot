@@ -1,33 +1,35 @@
 """
-Генерация контента для Telegram-группы.
+Подготовка дайджестов исследований для Telegram-группы.
 
 Поток:
 1. Тренер пишет /content → выбирает тип
-2. Бот генерирует текст + картинку через Gemini API
+2. Бот находит свежие исследования PubMed и объясняет их через Gemini
 3. Присылает тренеру на проверку с кнопками 🔄 / ❌
-4. Тренер одобряет → бот присылает чистый текст + картинку для копирования
+4. Тренер одобряет → бот присылает чистый текст и ссылки для копирования
 5. Тренер сам публикует в нужный топик от своего имени
 """
 
-import io
 import logging
 
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardButton, InlineKeyboardMarkup,
-    BufferedInputFile,
 )
 from aiogram.filters import Command
 
 from bot.config import load_config
-from bot.database import get_content_titles, save_content_title
-from bot.services.content_gen import generate_content, generate_image
+from bot.database import (
+    get_content_titles,
+    save_content_title,
+    save_research_sources,
+)
+from bot.services.content_gen import generate_content
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# message_id → (content_type, title) — временное хранилище до одобрения тренером
+# message_id → (content_type, title, research_sources) — временное хранилище до одобрения
 _pending: dict = {}
 
 
@@ -46,16 +48,7 @@ def approval_keyboard(content_type: str) -> InlineKeyboardMarkup:
                 callback_data=f"content_regen_{content_type}",
             ),
         ],
-        [
-            InlineKeyboardButton(
-                text="🖼 + Картинку",
-                callback_data=f"content_image_{content_type}",
-            ),
-            InlineKeyboardButton(
-                text="❌ Отменить",
-                callback_data="content_cancel",
-            ),
-        ],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="content_cancel")],
     ])
 
 
@@ -71,21 +64,21 @@ async def cmd_content(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="🥗 Питание",
+                text="🥗 Исследования о питании",
                 callback_data="content_gen_nutrition",
             ),
             InlineKeyboardButton(
-                text="📚 Статья о спорте",
+                text="💪 Исследования о тренировках",
                 callback_data="content_gen_article",
             ),
         ],
     ])
 
     await message.answer(
-        "📝 <b>Генерация контента</b>\n\n"
-        "Выбери тип поста. Я сгенерирую текст, "
-        "ты проверишь и скопируешь в нужный топик.\n\n"
-        "Также можно сгенерировать картинку к посту.",
+        "🔬 <b>Дайджест исследований</b>\n\n"
+        "Выбери направление. Я найду свежие научные публикации в PubMed, "
+        "кратко и понятно объясню результаты и добавлю прямые ссылки на источники.\n\n"
+        "Ты проверишь выпуск и скопируешь его в нужный топик.",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -93,7 +86,7 @@ async def cmd_content(message: Message):
 
 @router.message(Command("content_nutrition"))
 async def cmd_content_nutrition(message: Message):
-    """Сгенерировать пост о питании."""
+    """Подготовить дайджест исследований о питании."""
     config = load_config()
     if message.from_user.id != config.admin_chat_id:
         return
@@ -102,7 +95,7 @@ async def cmd_content_nutrition(message: Message):
 
 @router.message(Command("content_article"))
 async def cmd_content_article(message: Message):
-    """Сгенерировать статью о спорте."""
+    """Подготовить дайджест исследований о тренировках."""
     config = load_config()
     if message.from_user.id != config.admin_chat_id:
         return
@@ -110,20 +103,22 @@ async def cmd_content_article(message: Message):
 
 
 async def _generate_and_show(message: Message, content_type: str, config):
-    """Генерирует текст и показывает превью."""
-    label = "питании" if content_type == "nutrition" else "спорте"
-    emoji = "🥗" if content_type == "nutrition" else "📚"
+    """Подбирает исследования и показывает превью."""
+    label = "питании" if content_type == "nutrition" else "тренировках"
+    emoji = "🥗" if content_type == "nutrition" else "💪"
 
-    await message.answer(f"⏳ Генерирую пост о {label}...")
+    await message.answer(f"⏳ Ищу свежие исследования о {label}...")
     past_titles = await get_content_titles(content_type)
-    title, text = await generate_content(content_type, config.gemini_api_key, past_titles)
+    title, text, research_sources = await generate_content(
+        content_type, config.gemini_api_key, past_titles,
+    )
 
     sent = await message.answer(
-        f"{emoji} <b>Превью:</b>\n\n{text}",
+        f"{emoji} Превью дайджеста:\n\n{text}",
         reply_markup=approval_keyboard(content_type),
-        parse_mode="HTML",
+        parse_mode=None,
     )
-    _pending[sent.message_id] = (content_type, title)
+    _pending[sent.message_id] = (content_type, title, research_sources)
 
 
 # ── Callback: генерация из меню ──────────────────────────────────
@@ -134,16 +129,18 @@ async def cb_gen_nutrition(callback: CallbackQuery):
     if callback.from_user.id != config.admin_chat_id:
         await callback.answer("Только для тренера", show_alert=True)
         return
-    await callback.message.edit_text("⏳ Генерирую пост о питании...")
+    await callback.message.edit_text("⏳ Ищу свежие исследования о питании...")
     await callback.answer()
     past_titles = await get_content_titles("nutrition")
-    title, text = await generate_content("nutrition", config.gemini_api_key, past_titles)
-    await callback.message.edit_text(
-        f"🥗 <b>Превью:</b>\n\n{text}",
-        reply_markup=approval_keyboard("nutrition"),
-        parse_mode="HTML",
+    title, text, research_sources = await generate_content(
+        "nutrition", config.gemini_api_key, past_titles,
     )
-    _pending[callback.message.message_id] = ("nutrition", title)
+    await callback.message.edit_text(
+        f"🥗 Превью дайджеста:\n\n{text}",
+        reply_markup=approval_keyboard("nutrition"),
+        parse_mode=None,
+    )
+    _pending[callback.message.message_id] = ("nutrition", title, research_sources)
 
 
 @router.callback_query(F.data == "content_gen_article")
@@ -152,16 +149,18 @@ async def cb_gen_article(callback: CallbackQuery):
     if callback.from_user.id != config.admin_chat_id:
         await callback.answer("Только для тренера", show_alert=True)
         return
-    await callback.message.edit_text("⏳ Генерирую статью о спорте...")
+    await callback.message.edit_text("⏳ Ищу свежие исследования о тренировках...")
     await callback.answer()
     past_titles = await get_content_titles("article")
-    title, text = await generate_content("article", config.gemini_api_key, past_titles)
-    await callback.message.edit_text(
-        f"📚 <b>Превью:</b>\n\n{text}",
-        reply_markup=approval_keyboard("article"),
-        parse_mode="HTML",
+    title, text, research_sources = await generate_content(
+        "article", config.gemini_api_key, past_titles,
     )
-    _pending[callback.message.message_id] = ("article", title)
+    await callback.message.edit_text(
+        f"💪 Превью дайджеста:\n\n{text}",
+        reply_markup=approval_keyboard("article"),
+        parse_mode=None,
+    )
+    _pending[callback.message.message_id] = ("article", title, research_sources)
 
 
 # ── Callback: одобрение → чистый текст для копирования ───────────
@@ -174,10 +173,15 @@ async def cb_approve(callback: CallbackQuery, bot: Bot):
     # Сохраняем тему в историю (если есть в pending)
     pending = _pending.pop(callback.message.message_id, None)
     if pending:
-        saved_type, title = pending
+        saved_type, title, research_sources = pending
         if title:
             await save_content_title(saved_type, title)
             logger.info("Тема сохранена в историю: type=%s, title=%r", saved_type, title)
+        if research_sources:
+            await save_research_sources(
+                saved_type,
+                [(paper.pmid, paper.title) for paper in research_sources],
+            )
 
     # Извлекаем текст (убираем заголовок "Превью:")
     full_text = callback.message.text or ""
@@ -200,58 +204,6 @@ async def cb_approve(callback: CallbackQuery, bot: Bot):
     logger.info("Контент одобрен: type=%s", content_type)
 
 
-# ── Callback: сгенерировать картинку ─────────────────────────────
-
-@router.callback_query(F.data.startswith("content_image_"))
-async def cb_generate_image(callback: CallbackQuery, bot: Bot):
-    """Генерация картинки к посту через Kie AI (Nano Banana 2)."""
-    logger.info("Запрос на генерацию картинки: callback_data=%s", callback.data)
-
-    try:
-        config = load_config()
-        content_type = callback.data.replace("content_image_", "")
-
-        # Используем заголовок из pending (точнее описывает тему)
-        pending = _pending.get(callback.message.message_id)
-        if pending:
-            _, title = pending
-            topic = title
-        else:
-            # Фоллбэк: первые 100 символов текста
-            full_text = callback.message.text or ""
-            lines = full_text.split("\n", 2)
-            post_text = lines[2] if len(lines) > 2 else full_text
-            topic = post_text[:100]
-
-        logger.info("Генерация картинки: topic=%r, kie_key=%s...",
-                     topic[:30], config.kie_api_key[:8] if config.kie_api_key else "EMPTY")
-
-        await callback.answer("⏳ Генерирую картинку (до 2 мин)...")
-
-        image_data = await generate_image(topic, config.kie_api_key)
-
-        if image_data:
-            photo = BufferedInputFile(image_data, filename="post_image.jpg")
-            await bot.send_photo(
-                chat_id=callback.from_user.id,
-                photo=photo,
-                caption="🖼 Картинка к посту. Сохрани и отправь вместе с текстом.",
-            )
-            logger.info("Картинка отправлена пользователю %s", callback.from_user.id)
-        else:
-            await bot.send_message(
-                chat_id=callback.from_user.id,
-                text="⚠️ Не удалось сгенерировать картинку. Попробуй ещё раз.",
-            )
-            logger.warning("Картинка не сгенерирована")
-    except Exception as e:
-        logger.error("Ошибка в cb_generate_image: %s", e, exc_info=True)
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f"⚠️ Ошибка: {e}",
-        )
-
-
 # ── Callback: переделать ─────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("content_regen_"))
@@ -259,22 +211,30 @@ async def cb_regen(callback: CallbackQuery):
     """Переделать контент."""
     config = load_config()
     content_type = callback.data.replace("content_regen_", "")
-    emoji = "🥗" if content_type == "nutrition" else "📚"
-    label = "питании" if content_type == "nutrition" else "спорте"
+    emoji = "🥗" if content_type == "nutrition" else "💪"
+    label = "питании" if content_type == "nutrition" else "тренировках"
 
-    _pending.pop(callback.message.message_id, None)
-    await callback.message.edit_text(f"⏳ Генерирую новый пост о {label}...")
+    previous = _pending.pop(callback.message.message_id, None)
+    excluded_pmids = {
+        paper.pmid for paper in previous[2]
+    } if previous else set()
+    await callback.message.edit_text(f"⏳ Ищу другой свежий материал о {label}...")
     await callback.answer()
 
     past_titles = await get_content_titles(content_type)
-    title, text = await generate_content(content_type, config.gemini_api_key, past_titles)
+    title, text, research_sources = await generate_content(
+        content_type,
+        config.gemini_api_key,
+        past_titles,
+        excluded_pmids=excluded_pmids,
+    )
 
     await callback.message.edit_text(
-        f"{emoji} <b>Превью:</b>\n\n{text}",
+        f"{emoji} Превью дайджеста:\n\n{text}",
         reply_markup=approval_keyboard(content_type),
-        parse_mode="HTML",
+        parse_mode=None,
     )
-    _pending[callback.message.message_id] = (content_type, title)
+    _pending[callback.message.message_id] = (content_type, title, research_sources)
 
 
 # ── Callback: отменить ───────────────────────────────────────────
