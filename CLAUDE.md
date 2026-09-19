@@ -133,7 +133,11 @@ bot/
 
 ## Env vars (Render)
 
-Критичные: `BOT_TOKEN`, `ADMIN_CHAT_ID`, `WEBHOOK_BASE_URL` (без trailing slash), `WEBHOOK_SECRET`, `YUKASSA_SHOP_ID`, `YUKASSA_SECRET_KEY`, `GROUP_GENERAL_ID`, `GROUP_START_ID`, `GROUP_PROGRESS_ID`, `GROUP_RESULT_ID`, `GEMINI_API_KEY`, `DATABASE_URL`. Для PubMed можно необязательно задать `NCBI_EMAIL` — это контакт разработчика для запросов к научной базе.
+Критичные: `BOT_TOKEN`, `ADMIN_CHAT_ID`, `WEBHOOK_BASE_URL` (без trailing slash), `WEBHOOK_SECRET`, `YUKASSA_SHOP_ID`, `YUKASSA_SECRET_KEY`, `GROUP_GENERAL_ID`, `GROUP_START_ID`, `GROUP_PROGRESS_ID`, `GROUP_RESULT_ID`, `GEMINI_API_KEY`, `GEMINI_BASE_URL` (адрес Cloudflare-прокси — без него Gemini отвечает с Render 403), `DATABASE_URL`.
+
+Необязательные: `GEMINI_MODEL` (сменить модель без правки кода), `NCBI_EMAIL` (контакт для запросов к научной базе PubMed).
+
+Полный список с пояснениями — в `.env.example`.
 
 ## Платежи
 
