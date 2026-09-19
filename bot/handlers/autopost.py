@@ -155,7 +155,13 @@ async def _send_preview(
     """
     config = load_config()
     emoji, label = _labels(content_type)
-    header = "Пост из твоей надиктовки" if source else f"Свежие исследования о {label}"
+    if source:
+        header = "Пост из твоей надиктовки"
+    else:
+        topic = research_sources[0].topic if research_sources else ""
+        header = f"Свежие исследования о {label}"
+        if topic:
+            header += f" — тема: {topic}"
     sent = await bot.send_message(
         chat_id=config.admin_chat_id,
         text=(
